@@ -85,6 +85,4 @@ cargo build --release
 
 This project is licensed under the MIT License. See LICENSE for details.
 
-'Copy the entire block above into `~/engineering/core_systems/README.md`.'
-
 
