@@ -1,5 +1,19 @@
+# Rust / Cargo
 /target/
 **/*.rs.bk
+
+# IDEs
+.vscode/
+.idea/
 .DS_Store
+
+# Logs y Temporales
 *.log
-Cargo.lock
+/tmp/
+/aegis/target/
+/celer/target/
+/chronos/target/
+
+# Base de datos local
+*.db
+*.db-journal

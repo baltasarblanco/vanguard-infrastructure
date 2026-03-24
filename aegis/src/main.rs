@@ -116,7 +116,7 @@ async fn main() {
         
         let producer = unsafe { &mut *(producer_ptr as *mut ring_buffer::AegisProducer) };
         
-        for i in 0..1_000_000 {
+        for i in 0..100_000_000 {
             let event = ring_buffer::NetworkEvent {
                 timestamp: i as u64,
                 source_ip: 3232235777,
@@ -131,7 +131,7 @@ async fn main() {
                 std::hint::spin_loop(); 
             }
         }
-        println!("🔥 [AEGIS ARTILLERY] Fuego cesado. 1,000,000 eventos inyectados en la RAM.");
+        println!("🔥 [AEGIS ARTILLERY] Fuego cesado. 100,000,000 eventos inyectados en la RAM.");
     });
     // =======================================================================
 
