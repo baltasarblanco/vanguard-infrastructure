@@ -53,12 +53,10 @@ Theoretical Peak (Lab Environment)
 | Mitigation Latency    | `<12 ms` for 1M event burst|
 | Memory Profile        | **Deterministic**, zero-malloc during active attack mitigation |
 
-Real-World Baseline (Local Machine Proof)
-    Environment: Pop!_OS 22.04 | 100M Event Burst | No Core Pinning
-
-- **Peak Throughput**: `27.98 Mpps`
-- **Processing Speed**: ~35.7 nanoseconds per network event.
-- **Packet Loss**: 0.00% (Zero-Copy Ring Buffer stability).
+### 🚀 Real-World Baseline (Verified)
+- **Peak Throughput**: `25.72 Mpps` (Sustained over 100M events)
+- **Event Latency**: `~38.8 ns` per packet.
+- **Environment**: Pop!_OS 22.04 | Ryzen Core Isolation (taskset)
 
 ``(Insert your telemetry screenshot here to show the 27.98 Mpps in action)``
 

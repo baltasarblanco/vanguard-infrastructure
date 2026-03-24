@@ -116,22 +116,23 @@ async fn main() {
         
         let producer = unsafe { &mut *(producer_ptr as *mut ring_buffer::AegisProducer) };
         
-        for i in 0..100_000_000 {
+        for i in 0..100_000_000 { 
             let event = ring_buffer::NetworkEvent {
-                timestamp: i as u64,
-                source_ip: 3232235777,
-                dest_port: 443,
-                protocol: 6,
-                flags: 2, // SYN
-                payload_len: 0,
-            };
-            
-            // Si la cola está llena, giramos (spin) esperando a que Celer consuma
-            while producer.push(event).is_err() {
-                std::hint::spin_loop(); 
-            }
-        }
-        println!("🔥 [AEGIS ARTILLERY] Fuego cesado. 100,000,000 eventos inyectados en la RAM.");
+            timestamp: i as u64,
+            source_ip: 3232235777, // 192.168.1.1
+            dest_port: 443,
+            protocol: 6,
+            flags: 2, // SYN
+            payload_len: 0,
+        };
+    
+        // Si la cola está llena, giramos (spin) esperando a que Celer consuma
+        while producer.push(event).is_err() {
+            std::hint::spin_loop(); // Mechanical Sympathy: Bypass del Kernel
+    }
+}
+// Actualizá también el print final para que no mienta:
+println!("🔥 [AEGIS ARTILLERY] Fuego cesado. 100,000,000 eventos inyectados en la RAM.");
     });
     // =======================================================================
 

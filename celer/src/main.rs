@@ -60,46 +60,42 @@ async fn main() {
         let stdout = io::stdout();
         let mut handle = stdout.lock();
 
+        // Limpieza inicial
         write!(handle, "\x1B[2J\x1B[H").unwrap();
-        writeln!(handle, "========================================").unwrap();
-        writeln!(handle, "     🛰️  VANGUARD TELEMETRY (LIVE)     ").unwrap();
-        writeln!(handle, "========================================").unwrap();
-        writeln!(handle, "Status: \x1B[32mRUNNING\x1B[0m").unwrap();
-        writeln!(handle, "Total Events: ").unwrap();
-        writeln!(handle, "Throughput:   ").unwrap();
-        writeln!(handle, "Peak Speed:   ").unwrap(); // <--- Nueva línea
-        writeln!(handle, "----------------------------------------").unwrap();
-        handle.flush().unwrap();
 
         loop {
-            // Bajamos el sleep a 500ms para tener más chances de capturar la ráfaga
-            std::thread::sleep(Duration::from_millis(500));
+        // Muestreo cada 100ms para no perdernos la ráfaga
+        std::thread::sleep(Duration::from_millis(100));
 
-            let current_count = EVENTS_PROCESSED.load(Ordering::Relaxed);
-            let current_time = Instant::now();
-            let events_delta = current_count.saturating_sub(last_count);
-            let duration = current_time.duration_since(last_time).as_secs_f64();
-            let mpps = (events_delta as f64 / duration) / 1_000_000.0;
-
+        let current_count = EVENTS_PROCESSED.load(Ordering::Relaxed);
+        let current_time = Instant::now();
+        
+        let delta_events = current_count.saturating_sub(last_count);
+        let delta_time = current_time.duration_since(last_time).as_secs_f64();
+        
+        if delta_time > 0.0 {
+            let mpps = (delta_events as f64 / delta_time) / 1_000_000.0;
             if mpps > peak_mpps { peak_mpps = mpps; }
 
-            // Sobrescribimos las 4 líneas
-            write!(handle, "\x1B[4A").unwrap(); 
-            writeln!(handle, "Total Events: \x1B[0K{} events", current_count).unwrap();
+            // Dibujado táctico (Sobrescribiendo líneas fijas)
+            write!(handle, "\x1B[H").unwrap(); // Volver al inicio (0,0)
+            writeln!(handle, "========================================").unwrap();
+            writeln!(handle, "     🛰️  VANGUARD TELEMETRY (LIVE)     ").unwrap();
+            writeln!(handle, "========================================").unwrap();
+            writeln!(handle, "Status:      \x1B[32mRUNNING\x1B[0m").unwrap();
+            writeln!(handle, "Total Count: \x1B[36m{} events\x1B[0m\x1B[0K", current_count).unwrap();
             
-            let mpps_color = if mpps > 0.1 { "\x1B[32m" } else { "\x1B[37m" };
-            writeln!(handle, "Throughput:   \x1B[0K{}{:.2} Mpps\x1B[0m", mpps_color, mpps).unwrap();
-            
-            // Mostramos el récord en Amarillo
-            writeln!(handle, "Peak Speed:   \x1B[0K\x1B[33m{:.2} Mpps\x1B[0m", peak_mpps).unwrap();
-            
-            write!(handle, "\x1B[1B").unwrap(); 
+            let color = if mpps > 50.0 { "\x1B[32m" } else { "\x1B[33m" };
+            writeln!(handle, "Throughput:  {}{:.2} Mpps\x1B[0m\x1B[0K", color, mpps).unwrap();
+            writeln!(handle, "Peak Speed:  \x1B[35m{:.2} Mpps\x1B[0m\x1B[0K", peak_mpps).unwrap();
+            writeln!(handle, "----------------------------------------").unwrap();
             handle.flush().unwrap();
+        }
 
-            last_count = current_count;
-            last_time = current_time;
-            }
-        });
+        last_count = current_count;
+        last_time = current_time;
+    }
+});
 
         // Esperar conexión de Aegis
         let (stream, _) = listener.accept().expect("Fallo al aceptar conexión de Aegis");
