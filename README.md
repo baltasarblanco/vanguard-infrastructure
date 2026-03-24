@@ -45,3 +45,26 @@ cargo build --release
 This project is licensed under the MIT License. See LICENSE for details.
 
 'Copy the entire block above into `~/engineering/core_systems/README.md`.'
+
+
+                                [ ETHERNET / RAW SOCKETS ]
+                                            |
+       _____________________________________V_____________________________________
+      |                                                                           |
+      |          AEGIS PROXY (L4) - io_uring & Thread-per-Core                    |
+      |   [ Core 0 ]  [ Core 1 ]  [ Core 2 ]  [ Core 3 ] ... [ Core 31 ]          |
+      |_______|___________|___________|___________|_____________|_________________|
+              |           |           |           |             |
+              |           |           |           |             |  [ SCM_RIGHTS ]
+              |           |           |           |             |  [ Zero-Copy  ]
+       _______V___________V___________V___________V_____________V_________________
+      |                                                                           |
+      |          CELER ENGINE (CEP) - 85 Mpps Centinel                            |
+      |   [ Lock-Free Ring Buffer ] <--- [ Fast-Path IP Tracking (O(1)) ]         |
+      |_________________|_______________________________________|_________________|
+                        |                                       |
+          ______________|______________           ______________|______________
+         |                             |         |                             |
+         |   CHRONOS DB (LSM-Tree)     |         |    RYŪ DASHBOARD (Web)      |
+         |      (Persistence)          |         |     (Real-time Visuals)     |
+         |_____________________________|         |_____________________________|
