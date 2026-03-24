@@ -1,0 +1,12 @@
+[package]
+name = "aegis_proxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+tokio-uring = { workspace = true }
+nix = { workspace = true } # Esto heredará las features correctas de la raíz
+memmap2 = { workspace = true }
+core_affinity = { workspace = true }
+socket2 = { workspace = true }

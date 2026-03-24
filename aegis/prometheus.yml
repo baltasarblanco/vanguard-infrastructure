@@ -1,0 +1,8 @@
+global:
+  scrape_interval: 1s # Scrapeo agresivo (cada segundo) para latencia en tiempo real
+
+scrape_configs:
+  - job_name: 'aegis_proxy'
+    static_configs:
+      # Como usaremos red nativa en Linux, localhost apuntará a tu máquina real
+      - targets: ['127.0.0.1:8082']
