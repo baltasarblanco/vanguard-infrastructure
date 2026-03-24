@@ -133,6 +133,10 @@ async fn main() {
 }
 // Actualizá también el print final para que no mienta:
 println!("🔥 [AEGIS ARTILLERY] Fuego cesado. 100,000,000 eventos inyectados en la RAM.");
+// ¡CRUCIAL! No cierres el proceso todavía. 
+// Dale 2 segundos a CELER para que termine de vaciar la memoria compartida.
+std::thread::sleep(Duration::from_secs(2)); 
+println!("💀 [AEGIS CONTROL PLANE] Apagado completo.");
     });
     // =======================================================================
 

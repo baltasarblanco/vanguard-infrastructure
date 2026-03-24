@@ -17,12 +17,14 @@ use tokio::sync::broadcast;
 use futures_util::{SinkExt, StreamExt}; 
 use serde::Serialize;
 
+// ... (Tus imports arriba siguen igual)
+
 // --- CONFIGURACIÓN ---
 const FAST_PATH_SIZE: usize = 65536;
 const IP_INDEX_MASK: u32 = (FAST_PATH_SIZE - 1) as u32;
 const DDOS_THRESHOLD: u32 = 10_000;
 
-// Contador global para el hilo de métricas
+// 1. EL CONTADOR ATÓMICO (Fuera del main)
 static EVENTS_PROCESSED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
@@ -41,74 +43,67 @@ struct ThreatAlert {
 
 #[tokio::main]
 async fn main() {
-    // 1. CANAL CENTRAL (El único que importa)
+    // 2. CANAL PARA EL DASHBOARD RYŪ
     let (tx, _) = broadcast::channel::<ThreatAlert>(100);
-    let tx_for_core = tx.clone(); // Clonamos para enviarlo al hilo de procesamiento
+    let tx_for_core = tx.clone(); 
 
-    // 2. EL HILO DE INFRAESTRUCTURA (Socket Unix + Memmap)
-    thread::spawn(move || {
-        let socket_path = "/tmp/celer_bridge.sock";
-        let _ = remove_file(socket_path);
-
-        let listener = UnixListener::bind(socket_path).expect("Fallo al crear socket");
-        
-        // --- HILO DE TELEMETRÍA (Dashboard de Terminal) ---
-        std::thread::spawn(move || {
+    // 3. LANZAR HILO DE TELEMETRÍA (El Observador)
+    // Se lanza primero para que esté listo cuando empiece el tráfico.
+    std::thread::spawn(move || {
         let mut last_count = 0;
         let mut last_time = Instant::now();
-        let mut peak_mpps = 0.0; // <--- Guardamos el récord
+        let mut peak_mpps = 0.0;
         let stdout = io::stdout();
         let mut handle = stdout.lock();
 
-        // Limpieza inicial
-        write!(handle, "\x1B[2J\x1B[H").unwrap();
+        write!(handle, "\x1B[2J\x1B[H").unwrap(); // Limpiar pantalla
 
         loop {
-        // Muestreo cada 100ms para no perdernos la ráfaga
-        std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(200)); 
 
-        let current_count = EVENTS_PROCESSED.load(Ordering::Relaxed);
-        let current_time = Instant::now();
-        
-        let delta_events = current_count.saturating_sub(last_count);
-        let delta_time = current_time.duration_since(last_time).as_secs_f64();
-        
-        if delta_time > 0.0 {
-            let mpps = (delta_events as f64 / delta_time) / 1_000_000.0;
-            if mpps > peak_mpps { peak_mpps = mpps; }
-
-            // Dibujado táctico (Sobrescribiendo líneas fijas)
-            write!(handle, "\x1B[H").unwrap(); // Volver al inicio (0,0)
-            writeln!(handle, "========================================").unwrap();
-            writeln!(handle, "     🛰️  VANGUARD TELEMETRY (LIVE)     ").unwrap();
-            writeln!(handle, "========================================").unwrap();
-            writeln!(handle, "Status:      \x1B[32mRUNNING\x1B[0m").unwrap();
-            writeln!(handle, "Total Count: \x1B[36m{} events\x1B[0m\x1B[0K", current_count).unwrap();
+            let current_count = EVENTS_PROCESSED.load(Ordering::Relaxed);
+            let current_time = Instant::now();
+            let delta_events = current_count.saturating_sub(last_count);
+            let delta_time = current_time.duration_since(last_time).as_secs_f64();
             
-            let color = if mpps > 50.0 { "\x1B[32m" } else { "\x1B[33m" };
-            writeln!(handle, "Throughput:  {}{:.2} Mpps\x1B[0m\x1B[0K", color, mpps).unwrap();
-            writeln!(handle, "Peak Speed:  \x1B[35m{:.2} Mpps\x1B[0m\x1B[0K", peak_mpps).unwrap();
-            writeln!(handle, "----------------------------------------").unwrap();
-            handle.flush().unwrap();
+            if delta_time > 0.0 {
+                let current_mpps = (delta_events as f64 / delta_time) / 1_000_000.0;
+                if current_mpps > peak_mpps { peak_mpps = current_mpps; }
+
+                write!(handle, "\x1B[H").unwrap(); 
+                writeln!(handle, "========================================").unwrap();
+                writeln!(handle, "     🛰️  VANGUARD TELEMETRY (LIVE)     ").unwrap();
+                writeln!(handle, "========================================").unwrap();
+                writeln!(handle, "Status:      \x1B[32mRUNNING\x1B[0m").unwrap();
+                writeln!(handle, "Total Count: \x1B[36m{:>12} events\x1B[0m", current_count).unwrap();
+                let color = if current_mpps > 0.1 { "\x1B[32m" } else { "\x1B[37m" };
+                writeln!(handle, "Inst. Speed: {}{:>12.2} Mpps\x1B[0m", color, current_mpps).unwrap();
+                writeln!(handle, "PEAK SPEED:  \x1B[33m\x1B[1m{:>12.2} Mpps\x1B[0m", peak_mpps).unwrap();
+                writeln!(handle, "----------------------------------------").unwrap();
+                handle.flush().unwrap();
+            }
+            last_count = current_count;
+            last_time = last_time + Duration::from_secs_f64(delta_time);
         }
+    });
 
-        last_count = current_count;
-        last_time = current_time;
-    }
-});
-
-        // Esperar conexión de Aegis
-        let (stream, _) = listener.accept().expect("Fallo al aceptar conexión de Aegis");
+    // 4. EL HILO DE INFRAESTRUCTURA Y HOT LOOP (El Motor)
+    thread::spawn(move || {
+        let socket_path = "/tmp/celer_bridge.sock";
+        let _ = remove_file(socket_path);
+        let listener = UnixListener::bind(socket_path).expect("Error socket");
+        let (stream, _) = listener.accept().expect("Error conexión Aegis");
+        
+        // --- Setup de Memoria Compartida ---
         let mut iov_buf = [0u8; 4];
         let mut iov = [io::IoSliceMut::new(&mut iov_buf)];
         let mut cmsg_buffer = cmsg_space!([std::os::unix::io::RawFd; 1]);
-
         let msg = recvmsg::<()>(stream.as_raw_fd(), &mut iov, Some(&mut cmsg_buffer), MsgFlags::empty()).unwrap();
+        
         let mut received_fd = -1;
-        let cmsgs = msg.cmsgs().expect("Error en cmsgs");
-        for cmsg in cmsgs {
+        if let Some(cmsg) = msg.cmsgs().unwrap().next() {
             if let ControlMessageOwned::ScmRights(fds) = cmsg {
-                if let Some(&fd) = fds.first() { received_fd = fd; break; }
+                received_fd = fds[0];
             }
         }
 
@@ -116,16 +111,13 @@ async fn main() {
         let mut mmap = unsafe { MmapMut::map_mut(&file).unwrap() };
         let ring_ptr = mmap.as_mut_ptr() as *mut ring_buffer::SharedRing;
         let mut consumer = unsafe { ring_buffer::CelerConsumer::new(ring_ptr) };
-
-        // --- HILO DEL NÚCLEO (Celer Core - Hot Loop) ---
         let mut fast_path: Vec<IpState> = vec![IpState { ip: 0, count: 0, blocked: false }; FAST_PATH_SIZE];
-        
+
+        // --- HOT LOOP ---
         loop {
             if let Some(event) = consumer.pop() {
-                // 1. Actualizar Métricas
                 EVENTS_PROCESSED.fetch_add(1, Ordering::Relaxed);
 
-                // 2. Lógica de Detección DDoS
                 let index = (event.source_ip & IP_INDEX_MASK) as usize;
                 let state = &mut fast_path[index];
 
@@ -144,22 +136,20 @@ async fn main() {
                         let b4 = event.source_ip as u8;
                         let ip_str = format!("{}.{}.{}.{}", b1, b2, b3, b4);
                         
-                        // 3. ENVIAR ALERTA REAL AL DASHBOARD
-                        let alert = ThreatAlert {
+                        let _ = tx_for_core.send(ThreatAlert {
                             ip: ip_str,
                             threat_type: "DDoS L7 (SYN Flood)".to_string(),
                             packets_seen: state.count,
-                        };
-                        let _ = tx_for_core.send(alert); 
+                        }); 
                     }
                 }
             } else {
-                thread::yield_now(); // No frenamos el core, solo cedemos un turno
+                std::hint::spin_loop(); 
             }
         }
     });
 
-    // 3. SERVIDOR WEB Y WEBSOCKETS
+    // 5. SERVIDOR RYŪ (Dashboard Web)
     let html_content = include_str!("index.html");
     let index_route = warp::path::end().map(move || warp::reply::html(html_content));
 
@@ -178,6 +168,5 @@ async fn main() {
             })
         });
 
-    let routes = index_route.or(ws_route);
-    warp::serve(routes).run(([0, 0, 0, 0], 3030)).await;
+    warp::serve(index_route.or(ws_route)).run(([0, 0, 0, 0], 3030)).await;
 }
