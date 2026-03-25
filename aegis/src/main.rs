@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 mod ring_buffer;
 
 use nix::sys::memfd::{memfd_create, MFdFlags};
@@ -13,14 +14,19 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::thread;
 use tokio::sync::broadcast;
+// Aseguráte de tener tokio-tungstenite en tu Cargo.toml
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::Message;
+use futures_util::{StreamExt, SinkExt};
 use tokio_uring::net::TcpListener;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const BIND_ADDR: &str = "0.0.0.0:8081";      
 const CHRONOS_ADDR: &str = "127.0.0.1:8080"; 
@@ -54,6 +60,9 @@ impl Drop for ConnectionGuard {
     }
 }
 
+// Generador de IDs de sesión para el Dojo
+static SESSION_COUNTER: AtomicU32 = AtomicU32::new(1);
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     println!("⚙️ [AEGIS CONTROL PLANE] Iniciando secuencia de arranque...");
@@ -67,7 +76,6 @@ async fn main() {
     let fd = memfd_create(celer_name.as_c_str(), MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING)
         .expect("Fallo al crear memfd");
 
-    // Calculamos el tamaño exacto de nuestra estructura RingBuffer (~3.1 MB)
     let ring_size = std::mem::size_of::<ring_buffer::SharedRing>() as i64; 
     ftruncate(&fd, ring_size).expect("Fallo al dimensionar la memoria IPC");
 
@@ -76,7 +84,6 @@ async fn main() {
 
     let mut celer_mmap = unsafe { MmapMut::map_mut(&fd).expect("Fallo al mapear IPC") };
 
-    // Inicializamos el Productor Seguro apuntando a la memoria
     let ring_ptr = celer_mmap.as_mut_ptr() as *mut ring_buffer::SharedRing;
     let producer = unsafe { ring_buffer::AegisProducer::new(ring_ptr) };
 
@@ -108,35 +115,83 @@ async fn main() {
         }
     });
 
-    // HILO 2: La Artillería Pesada (Prueba de Estrés Lock-Free L7)
+    // =======================================================================
+    // ⛩️ HILO 2: EL DOJO WEBSOCKET (Reemplaza a la Artillería Pesada)
+    // =======================================================================
+    // Necesitamos pasar el productor a un hilo asíncrono puro de Tokio
     let producer_ptr = Box::into_raw(Box::new(producer)) as usize; 
-    thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(4)); // Le damos 4 seg a Celer para que despierte
-        println!("🔥 [AEGIS ARTILLERY] Iniciando fuego de supresión (1 Millón de eventos)...");
+
+    tokio::spawn(async move {
+        // Le damos tiempo a CELER para que se conecte
+        tokio::time::sleep(Duration::from_secs(2)).await; 
         
-        let producer = unsafe { &mut *(producer_ptr as *mut ring_buffer::AegisProducer) };
-        
-        for i in 0..100_000_000 { 
-            let event = ring_buffer::NetworkEvent {
-            timestamp: i as u64,
-            source_ip: 3232235777, // 192.168.1.1
-            dest_port: 443,
-            protocol: 6,
-            flags: 2, // SYN
-            payload_len: 0,
-        };
-    
-        // Si la cola está llena, giramos (spin) esperando a que Celer consuma
-        while producer.push(event).is_err() {
-            std::hint::spin_loop(); // Mechanical Sympathy: Bypass del Kernel
-    }
-}
-// Actualizá también el print final para que no mienta:
-println!("🔥 [AEGIS ARTILLERY] Fuego cesado. 100,000,000 eventos inyectados en la RAM.");
-// ¡CRUCIAL! No cierres el proceso todavía. 
-// Dale 2 segundos a CELER para que termine de vaciar la memoria compartida.
-std::thread::sleep(Duration::from_secs(2)); 
-println!("💀 [AEGIS CONTROL PLANE] Apagado completo.");
+        let ws_addr = "0.0.0.0:8080";
+        let listener = tokio::net::TcpListener::bind(&ws_addr).await.expect("Error WS bind");
+        println!("⛩️ [AEGIS RYŪ] Dojo WebSocket Server escuchando en ws://{}", ws_addr);
+
+        while let Ok((stream, _)) = listener.accept().await {
+            let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+            // Recuperamos el productor (Como es un hilo asíncrono en `current_thread`, esto es seguro)
+            let mut producer_clone = unsafe { (*(producer_ptr as *mut ring_buffer::AegisProducer)).clone() };
+
+            tokio::spawn(async move {
+                let ws_stream = match accept_async(stream).await {
+                    Ok(ws) => ws,
+                    Err(e) => {
+                        eprintln!("Error en el handshake WebSocket: {}", e);
+                        return;
+                    }
+                };
+
+                println!("⚡ [AEGIS RYŪ] Nuevo discípulo conectado. Session ID: {}", session_id);
+                let (_, mut ws_receiver) = ws_stream.split();
+
+                while let Some(msg) = ws_receiver.next().await {
+                    match msg {
+                        Ok(Message::Binary(bin_data)) => {
+                            // Validamos el payload de 13 bytes del Frontend [x_f32, y_f32, pressure, flags]
+                            if bin_data.len() == 13 || bin_data.len() == 17 { // Ajustar según padding del JS
+                                let x_bytes: [u8; 4] = bin_data[0..4].try_into().unwrap_or([0;4]);
+                                let y_bytes: [u8; 4] = bin_data[4..8].try_into().unwrap_or([0;4]);
+                                let flag = bin_data[12];
+
+                                let x = f32::from_le_bytes(x_bytes);
+                                let y = f32::from_le_bytes(y_bytes);
+                                
+                                let timestamp = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_nanos() as u64;
+
+                                let action = match flag {
+                                    1 => 0, // start -> DOWN
+                                    0 => 1, // move -> MOVE
+                                    2 => 2, // end -> UP
+                                    _ => continue,
+                                };
+
+                                let event = ring_buffer::StrokeEvent {
+                                    session_id,
+                                    timestamp,
+                                    x,
+                                    y,
+                                    action,
+                                };
+
+                                if let Err(_) = producer_clone.push(event) {
+                                    eprintln!("⚠️ [AEGIS] Ring Buffer lleno.");
+                                }
+                            }
+                        }
+                        Ok(Message::Close(_)) => {
+                            println!("🛑 [AEGIS RYŪ] Discípulo {} desconectado.", session_id);
+                            break;
+                        }
+                        _ => {} 
+                    }
+                }
+            });
+        }
     });
     // =======================================================================
 

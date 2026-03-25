@@ -14,159 +14,184 @@ use std::io::{self, Write};
 
 use warp::Filter;
 use tokio::sync::broadcast;
-use futures_util::{SinkExt, StreamExt}; 
 use serde::Serialize;
+use futures_util::{SinkExt, StreamExt}; 
 
-// ... (Tus imports arriba siguen igual)
+// --- CONFIGURACIÓN TÁCTICA ---
+const CELER_PORT: u16 = 3030;
+const SESSION_POOL_SIZE: usize = 65536;
+const SESSION_MASK: usize = SESSION_POOL_SIZE - 1;
+const SPEED_THRESHOLD: f32 = 8.5;       
 
-// --- CONFIGURACIÓN ---
-const FAST_PATH_SIZE: usize = 65536;
-const IP_INDEX_MASK: u32 = (FAST_PATH_SIZE - 1) as u32;
-const DDOS_THRESHOLD: u32 = 10_000;
+const ACTION_DOWN: u8 = 0;
+const ACTION_MOVE: u8 = 1;
+const ACTION_UP: u8 = 2;
 
-// 1. EL CONTADOR ATÓMICO (Fuera del main)
 static EVENTS_PROCESSED: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy)]
-struct IpState {
-    ip: u32,
-    count: u32,
-    blocked: bool,
+struct SessionState {
+    active: bool,
+    last_x: f32, last_y: f32,
+    last_dx: f32, last_dy: f32,
+    last_timestamp: u64,
 }
 
+// Campos sincronizados con el Frontend RYŪ v2.2
 #[derive(Clone, Serialize)]
-struct ThreatAlert {
-    ip: String,
-    threat_type: String,
-    packets_seen: u32,
+struct PrecisionEvent {
+    session_id: u32,
+    precision: f32,      
+    feedback: String,    
+    speed: f32,
 }
 
 #[tokio::main]
 async fn main() {
-    // 2. CANAL PARA EL DASHBOARD RYŪ
-    let (tx, _) = broadcast::channel::<ThreatAlert>(100);
+    // Canal para transmitir el juicio de Celer hacia el WebSocket
+    let (tx, _) = broadcast::channel::<PrecisionEvent>(2048);
     let tx_for_core = tx.clone(); 
 
-    // 3. LANZAR HILO DE TELEMETRÍA (El Observador)
-    // Se lanza primero para que esté listo cuando empiece el tráfico.
+    // 1. MONITOR DE RENDIMIENTO (Terminal)
     std::thread::spawn(move || {
         let mut last_count = 0;
         let mut last_time = Instant::now();
-        let mut peak_mpps = 0.0;
         let stdout = io::stdout();
         let mut handle = stdout.lock();
-
-        write!(handle, "\x1B[2J\x1B[H").unwrap(); // Limpiar pantalla
-
+        write!(handle, "\x1B[2J\x1B[H").unwrap(); 
         loop {
-            std::thread::sleep(Duration::from_millis(200)); 
-
+            std::thread::sleep(Duration::from_millis(250)); 
             let current_count = EVENTS_PROCESSED.load(Ordering::Relaxed);
             let current_time = Instant::now();
             let delta_events = current_count.saturating_sub(last_count);
             let delta_time = current_time.duration_since(last_time).as_secs_f64();
-            
             if delta_time > 0.0 {
-                let current_mpps = (delta_events as f64 / delta_time) / 1_000_000.0;
-                if current_mpps > peak_mpps { peak_mpps = current_mpps; }
-
+                let mpps = (delta_events as f64 / delta_time) / 1_000_000.0;
                 write!(handle, "\x1B[H").unwrap(); 
                 writeln!(handle, "========================================").unwrap();
-                writeln!(handle, "     🛰️  VANGUARD TELEMETRY (LIVE)     ").unwrap();
+                writeln!(handle, "     🐉 RYŪ: PRECISION ANALYZER         ").unwrap();
                 writeln!(handle, "========================================").unwrap();
-                writeln!(handle, "Status:      \x1B[32mRUNNING\x1B[0m").unwrap();
-                writeln!(handle, "Total Count: \x1B[36m{:>12} events\x1B[0m", current_count).unwrap();
-                let color = if current_mpps > 0.1 { "\x1B[32m" } else { "\x1B[37m" };
-                writeln!(handle, "Inst. Speed: {}{:>12.2} Mpps\x1B[0m", color, current_mpps).unwrap();
-                writeln!(handle, "PEAK SPEED:  \x1B[33m\x1B[1m{:>12.2} Mpps\x1B[0m", peak_mpps).unwrap();
+                writeln!(handle, "Status:      \x1B[32mSTREAMING MODEL\x1B[0m").unwrap();
+                writeln!(handle, "Throughput:  \x1B[32m{:>12.2} Mpps\x1B[0m", mpps).unwrap();
                 writeln!(handle, "----------------------------------------").unwrap();
                 handle.flush().unwrap();
             }
             last_count = current_count;
-            last_time = last_time + Duration::from_secs_f64(delta_time);
+            last_time = current_time;
         }
     });
 
-    // 4. EL HILO DE INFRAESTRUCTURA Y HOT LOOP (El Motor)
+    // 2. MOTOR CINEMÁTICO (Hot Loop IPC)
     thread::spawn(move || {
         let socket_path = "/tmp/celer_bridge.sock";
         let _ = remove_file(socket_path);
-        let listener = UnixListener::bind(socket_path).expect("Error socket");
-        let (stream, _) = listener.accept().expect("Error conexión Aegis");
+        let listener = UnixListener::bind(socket_path).unwrap();
         
-        // --- Setup de Memoria Compartida ---
+        // El servidor web arrancará, pero este hilo esperará a AEGIS
+        let (stream, _) = listener.accept().expect("Fallo al conectar con AEGIS");
+        
         let mut iov_buf = [0u8; 4];
         let mut iov = [io::IoSliceMut::new(&mut iov_buf)];
         let mut cmsg_buffer = cmsg_space!([std::os::unix::io::RawFd; 1]);
         let msg = recvmsg::<()>(stream.as_raw_fd(), &mut iov, Some(&mut cmsg_buffer), MsgFlags::empty()).unwrap();
-        
         let mut received_fd = -1;
-        if let Some(cmsg) = msg.cmsgs().unwrap().next() {
-            if let ControlMessageOwned::ScmRights(fds) = cmsg {
-                received_fd = fds[0];
-            }
-        }
+        if let Some(ControlMessageOwned::ScmRights(fds)) = msg.cmsgs().unwrap().next() { received_fd = fds[0]; }
 
         let file = unsafe { File::from_raw_fd(received_fd) };
         let mut mmap = unsafe { MmapMut::map_mut(&file).unwrap() };
         let ring_ptr = mmap.as_mut_ptr() as *mut ring_buffer::SharedRing;
         let mut consumer = unsafe { ring_buffer::CelerConsumer::new(ring_ptr) };
-        let mut fast_path: Vec<IpState> = vec![IpState { ip: 0, count: 0, blocked: false }; FAST_PATH_SIZE];
 
-        // --- HOT LOOP ---
+        let mut fsm_pool = vec![SessionState { active: false, last_x: 0.0, last_y: 0.0, last_dx: 0.0, last_dy: 0.0, last_timestamp: 0 }; SESSION_POOL_SIZE];
+
         loop {
             if let Some(event) = consumer.pop() {
                 EVENTS_PROCESSED.fetch_add(1, Ordering::Relaxed);
+                let state = &mut fsm_pool[(event.session_id as usize) & SESSION_MASK];
 
-                let index = (event.source_ip & IP_INDEX_MASK) as usize;
-                let state = &mut fast_path[index];
-
-                if state.ip != event.source_ip {
-                    state.ip = event.source_ip;
-                    state.count = 1;
-                    state.blocked = false;
-                } else {
-                    state.count += 1;
-                    if state.count > DDOS_THRESHOLD && !state.blocked {
-                        state.blocked = true;
-                        
-                        let b1 = (event.source_ip >> 24) as u8;
-                        let b2 = (event.source_ip >> 16) as u8;
-                        let b3 = (event.source_ip >> 8) as u8;
-                        let b4 = event.source_ip as u8;
-                        let ip_str = format!("{}.{}.{}.{}", b1, b2, b3, b4);
-                        
-                        let _ = tx_for_core.send(ThreatAlert {
-                            ip: ip_str,
-                            threat_type: "DDoS L7 (SYN Flood)".to_string(),
-                            packets_seen: state.count,
-                        }); 
+                match event.action {
+                    ACTION_DOWN => {
+                        *state = SessionState { active: true, last_x: event.x, last_y: event.y, last_dx: 0.0, last_dy: 0.0, last_timestamp: event.timestamp };
                     }
+                    ACTION_MOVE => {
+                        if state.active {
+                            let dx = event.x - state.last_x;
+                            let dy = event.y - state.last_y;
+                            let dist = dx.hypot(dy);
+                            let dt = event.timestamp.saturating_sub(state.last_timestamp);
+
+                            if dist > 0.6 && dt > 0 {
+                                let speed = dist / (dt as f32);
+                                let nx = dx / dist; 
+                                let ny = dy / dist;
+
+                                let mut precision = 100.0;
+                                let mut feedback = "Trazo Maestro".to_string();
+
+                                if state.last_dx != 0.0 {
+                                    let dot = (nx * state.last_dx) + (ny * state.last_dy);
+                                    precision = ((dot + 1.0) / 2.0) * 100.0;
+                                    
+                                    feedback = match precision {
+                                        p if p > 94.0 => "🎯 Alineación Perfecta".to_string(),
+                                        p if p > 75.0 => "🟢 Estabilidad Óptima".to_string(),
+                                        p if p > 55.0 => "🟡 Pulso Inestable".to_string(),
+                                        _ => "🔴 Error de Precisión".to_string(),
+                                    };
+                                }
+
+                                if speed > SPEED_THRESHOLD {
+                                    feedback = "⚠️ Velocidad Excesiva".to_string();
+                                    precision = (precision - 15.0).max(0.0);
+                                }
+
+                                let _ = tx_for_core.send(PrecisionEvent {
+                                    session_id: event.session_id,
+                                    precision,
+                                    feedback,
+                                    speed,
+                                });
+
+                                state.last_dx = nx; state.last_dy = ny;
+                                state.last_x = event.x; state.last_y = event.y;
+                                state.last_timestamp = event.timestamp;
+                            }
+                        }
+                    }
+                    ACTION_UP => { state.active = false; }
+                    _ => {}
                 }
-            } else {
-                std::hint::spin_loop(); 
-            }
+            } else { std::hint::spin_loop(); }
         }
     });
 
-    // 5. SERVIDOR RYŪ (Dashboard Web)
+    // 3. SERVIDOR RYŪ (WEB + WEBSOCKET)
     let html_content = include_str!("index.html");
-    let index_route = warp::path::end().map(move || warp::reply::html(html_content));
 
+    // Servir el HTML en la raíz
+    let index_route = warp::get()
+        .and(warp::path::end())
+        .map(move || warp::reply::html(html_content));
+
+    // Servir el WebSocket de Telemetría
     let tx_ws = tx.clone();
     let ws_route = warp::path("ws")
         .and(warp::ws())
         .and(warp::any().map(move || tx_ws.clone()))
-        .map(|ws: warp::ws::Ws, tx: broadcast::Sender<ThreatAlert>| {
+        .map(|ws: warp::ws::Ws, tx: broadcast::Sender<PrecisionEvent>| {
             ws.on_upgrade(move |socket| async move {
                 let (mut ws_tx, _) = socket.split();
                 let mut rx = tx.subscribe();
-                while let Ok(alert) = rx.recv().await {
-                    let msg = serde_json::to_string(&alert).unwrap();
+                while let Ok(event) = rx.recv().await {
+                    let msg = serde_json::to_string(&event).unwrap();
                     if ws_tx.send(warp::ws::Message::text(msg)).await.is_err() { break; }
                 }
             })
         });
 
-    warp::serve(index_route.or(ws_route)).run(([0, 0, 0, 0], 3030)).await;
+    let routes = index_route.or(ws_route);
+
+    println!("🚀 RYŪ DOJO ONLINE | URL: http://localhost:3030");
+    // Bind global en 0.0.0.0 para que Firefox no falle
+    warp::serve(routes).run(([0, 0, 0, 0], CELER_PORT)).await;
 }

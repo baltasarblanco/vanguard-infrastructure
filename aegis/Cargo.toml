@@ -10,3 +10,5 @@ nix = { workspace = true } # Esto heredará las features correctas de la raíz
 memmap2 = { workspace = true }
 core_affinity = { workspace = true }
 socket2 = { workspace = true }
+tokio-tungstenite = "0.29.0"
+futures-util = "0.3"
