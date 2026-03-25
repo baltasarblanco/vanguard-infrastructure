@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Rust / Cargo
 /target/
 **/*.rs.bk
@@ -17,3 +18,11 @@
 # Base de datos local
 *.db
 *.db-journal
+=======
+/target/
+**/*.rs.bk
+celer_bridge.sock
+chronos_v3.db
+.DS_Store
+*.log
+>>>>>>> c2385f4 (feat: complete infrastructure workspace (Aegis, Celer, Chronos, Ryū))
