@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 mod ring_buffer;
 
-use nix::sys::memfd::{memfd_create, MFdFlags};
+use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
 use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
 use nix::unistd::ftruncate;
 use nix::fcntl::{fcntl, FcntlArg, SealFlag};
@@ -14,7 +14,6 @@ use socket2::{Domain, Protocol, Socket, Type};
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::thread;
 use tokio::sync::broadcast;
-// Aseguráte de tener tokio-tungstenite en tu Cargo.toml
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 use futures_util::{StreamExt, SinkExt};
@@ -73,13 +72,13 @@ async fn main() {
     println!("🌉 [AEGIS IPC] Forjando memoria compartida (memfd)...");
     
     let celer_name = CString::new("celer_bridge").unwrap();
-    let fd = memfd_create(celer_name.as_c_str(), MFdFlags::MFD_CLOEXEC | MFdFlags::MFD_ALLOW_SEALING)
+    let fd = memfd_create(celer_name.as_c_str(), MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING)
         .expect("Fallo al crear memfd");
 
     let ring_size = std::mem::size_of::<ring_buffer::SharedRing>() as i64; 
     ftruncate(&fd, ring_size).expect("Fallo al dimensionar la memoria IPC");
 
-    fcntl(&fd, FcntlArg::F_ADD_SEALS(SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW))
+    fcntl(fd.as_raw_fd(), FcntlArg::F_ADD_SEALS(SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW))
         .expect("Fallo al sellar la memoria IPC");
 
     let mut celer_mmap = unsafe { MmapMut::map_mut(&fd).expect("Fallo al mapear IPC") };
@@ -116,29 +115,28 @@ async fn main() {
     });
 
     // =======================================================================
-    // ⛩️ HILO 2: EL DOJO WEBSOCKET (Reemplaza a la Artillería Pesada)
+    // ⛩️ HILO 2: EL DOJO WEBSOCKET
     // =======================================================================
-    // Necesitamos pasar el productor a un hilo asíncrono puro de Tokio
     let producer_ptr = Box::into_raw(Box::new(producer)) as usize; 
 
     tokio::spawn(async move {
         // Le damos tiempo a CELER para que se conecte
         tokio::time::sleep(Duration::from_secs(2)).await; 
         
-        let ws_addr = "0.0.0.0:8080";
+        // 🔥 ACÁ ESTÁ EL CAMBIO: Puerto 9090 para no chocar
+        let ws_addr = "0.0.0.0:9090";
         let listener = tokio::net::TcpListener::bind(&ws_addr).await.expect("Error WS bind");
         println!("⛩️ [AEGIS RYŪ] Dojo WebSocket Server escuchando en ws://{}", ws_addr);
 
         while let Ok((stream, _)) = listener.accept().await {
             let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-            // Recuperamos el productor (Como es un hilo asíncrono en `current_thread`, esto es seguro)
             let mut producer_clone = unsafe { (*(producer_ptr as *mut ring_buffer::AegisProducer)).clone() };
 
             tokio::spawn(async move {
                 let ws_stream = match accept_async(stream).await {
                     Ok(ws) => ws,
                     Err(e) => {
-                        eprintln!("Error en el handshake WebSocket: {}", e);
+                        eprintln!("Error en el handshake WebSocket (Conexión ignorada): {}", e);
                         return;
                     }
                 };
@@ -149,8 +147,7 @@ async fn main() {
                 while let Some(msg) = ws_receiver.next().await {
                     match msg {
                         Ok(Message::Binary(bin_data)) => {
-                            // Validamos el payload de 13 bytes del Frontend [x_f32, y_f32, pressure, flags]
-                            if bin_data.len() == 13 || bin_data.len() == 17 { // Ajustar según padding del JS
+                            if bin_data.len() == 13 || bin_data.len() == 17 { 
                                 let x_bytes: [u8; 4] = bin_data[0..4].try_into().unwrap_or([0;4]);
                                 let y_bytes: [u8; 4] = bin_data[4..8].try_into().unwrap_or([0;4]);
                                 let flag = bin_data[12];

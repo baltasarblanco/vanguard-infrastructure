@@ -1,7 +1,0 @@
-/target
-**/*.rs.bk
-*.db
-*.bin
-*.log
-.env
-archivo_secreto.txt

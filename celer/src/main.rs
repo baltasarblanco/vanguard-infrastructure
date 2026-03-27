@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+mod lexer;
+mod ast; // <-- Agregá esta línea
 mod ring_buffer;
 
 use nix::cmsg_space;
@@ -18,7 +20,7 @@ use serde::Serialize;
 use futures_util::{SinkExt, StreamExt}; 
 
 // --- CONFIGURACIÓN TÁCTICA ---
-const CELER_PORT: u16 = 3030;
+const CELER_PORT: u16 = 9030;
 const SESSION_POOL_SIZE: usize = 65536;
 const SESSION_MASK: usize = SESSION_POOL_SIZE - 1;
 const SPEED_THRESHOLD: f32 = 8.5;       
@@ -95,7 +97,7 @@ async fn main() {
         let mut cmsg_buffer = cmsg_space!([std::os::unix::io::RawFd; 1]);
         let msg = recvmsg::<()>(stream.as_raw_fd(), &mut iov, Some(&mut cmsg_buffer), MsgFlags::empty()).unwrap();
         let mut received_fd = -1;
-        if let Some(ControlMessageOwned::ScmRights(fds)) = msg.cmsgs().unwrap().next() { received_fd = fds[0]; }
+        if let Some(ControlMessageOwned::ScmRights(fds)) = msg.cmsgs().next() { received_fd = fds[0]; }
 
         let file = unsafe { File::from_raw_fd(received_fd) };
         let mut mmap = unsafe { MmapMut::map_mut(&file).unwrap() };

@@ -149,7 +149,7 @@ async fn aegis_server(
     listener: TcpListener,
     tx_stroke: mpsc::Sender<StrokePoint>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("AEGIS WebSocket listening on ws://localhost:8080");
+    println!("AEGIS WebSocket listening on ws://localhost:9090");
 
     let mut next_session_id = 0u64;
 
@@ -196,7 +196,7 @@ async fn celer_websocket_server(
     listener: TcpListener,
     mut rx_telemetry: tokio::sync::broadcast::Receiver<Telemetry>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("CELER WebSocket listening on ws://localhost:3030");
+    println!("CELER WebSocket listening on ws://localhost:9030");
 
     while let Ok((stream, _)) = listener.accept().await {
         let peer_addr = stream.peer_addr()?;
@@ -204,9 +204,14 @@ async fn celer_websocket_server(
 
         let mut rx = rx_telemetry.resubscribe();
         tokio::spawn(async move {
-            let ws_stream = accept_async(stream).await.unwrap();
-            let (mut ws_sender, _) = ws_stream.split();
-
+            let ws_stream = match accept_async(stream).await {
+                Ok(ws) => ws,
+                Err(e) => {
+                    eprintln!("Conexión rechazada (No es WebSocket): {}", e);
+                    return;
+                }
+            };
+            let (mut _ws_sender, mut ws_receiver) = ws_stream.split();
             while let Ok(telemetry) = rx.recv().await {
                 let json = serde_json::to_string(&telemetry).unwrap();
                 if ws_sender.send(Message::Text(json.into())).await.is_err() {
@@ -228,8 +233,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(celer_task(rx_stroke, tx_telemetry.clone()));
 
     // Servidores WebSocket
-    let aegis_listener = TcpListener::bind("127.0.0.1:8081").await?;
-    let celer_listener = TcpListener::bind("127.0.0.1:3031").await?;
+    let aegis_listener = TcpListener::bind("127.0.0.1:9090").await?;
+    let celer_listener = TcpListener::bind("127.0.0.1:9030").await?;
 
     let aegis = aegis_server(aegis_listener, tx_stroke);
     let celer = celer_websocket_server(celer_listener, tx_telemetry.subscribe());
