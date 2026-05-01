@@ -211,7 +211,7 @@ async fn celer_websocket_server(
                     return;
                 }
             };
-            let (mut _ws_sender, mut ws_receiver) = ws_stream.split();
+            let (mut ws_sender, mut ws_receiver) = ws_stream.split();
             while let Ok(telemetry) = rx.recv().await {
                 let json = serde_json::to_string(&telemetry).unwrap();
                 if ws_sender.send(Message::Text(json.into())).await.is_err() {

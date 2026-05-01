@@ -202,15 +202,15 @@
     </div>
 
     <div class="dojo-controls">
-        <button id="clearBtn">🗑️ REINICIAR DOJO</button>
-        <button id="connectBtn">🔌 CONECTAR WS</button>
-        <button id="disconnectBtn">⛔ DESCONECTAR</button>
+        <button id="clearBtn" type="button">🗑️ REINICIAR DOJO</button>
+        <button id="connectBtn" type="button">🔌 CONECTAR WS</button>
+        <button id="disconnectBtn"type="button">⛔ DESCONECTAR</button>
     </div>
 </main>
 
 <script>
-    const WS_AEGIS_URL = "ws://127.0.0.1:9090/ryu";
-    const WS_CELER_URL = "ws://127.0.0.1:9030/ws";
+    const WS_AEGIS_URL = "ws://127.0.0.1:9090"; 
+    const WS_CELER_URL = "ws://127.0.0.1:3031/ws";
 
     let wsOut = null, wsIn = null;
     let connected = false;
@@ -227,12 +227,14 @@
 
     // --- MANEJO DEL CURSOR ---
     window.addEventListener('mousemove', (e) => {
+        if (!cursor) return;
         cursor.style.display = 'block';
         cursor.style.left = e.clientX + 'px';
         cursor.style.top = e.clientY + 'px';
     });
 
     function initCanvas() {
+        if (!canvas) return;
         canvas.width = 600;
         canvas.height = 600;
         ctx.lineCap = 'round';
@@ -240,6 +242,15 @@
         ctx.lineWidth = 10;
         ctx.strokeStyle = '#3affdd';
         clearCanvas();
+
+        try {
+            if (gauge) {
+                const r = parseFloat(gauge.getAttribute('r')) || 40;
+                const circ = 2 * Math.PI * r;
+                gauge.style.strokeDasharray = circ;
+                gauge.style.strokeDashoffset = circ;
+            }
+        } catch(e) { console.log("Aviso: No se pudo setear el gauge inicial"); }
     }
 
     function clearCanvas() {
@@ -289,7 +300,7 @@
     }
 
     function sendPoint(x, y, flag) {
-        if (!connected || wsOut.readyState !== WebSocket.OPEN) return;
+        if (!connected || !wsOut || wsOut.readyState !== WebSocket.OPEN) return;
         const buf = new ArrayBuffer(13);
         const view = new DataView(buf);
         view.setFloat32(0, x, true);
@@ -313,63 +324,92 @@
             document.getElementById('wsLed').classList.add('connected');
             document.getElementById('wsStatus').innerText = 'online';
             btn.innerText = "🔌 CONECTADO";
-            log.innerHTML = "<div>✅ Sincronización completa.</div>";
+            log.innerHTML = "<div>✅ Sincronización completa.</div>" + log.innerHTML;
         };
 
         wsIn.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            
-            // Reacción a 'precision' y 'feedback' (Celer Rust Fields)
-            if (data.precision !== undefined) {
-                const p = data.precision;
-                precisionText.innerText = p.toFixed(1) + "%";
-                gauge.style.strokeDashoffset = 251 - (251 * (p / 100));
-
-                // Cambio de color reactivo
-                let color = "#3affdd"; // Cian por defecto
-                if (p < 60) {
-                    color = "#ff3131"; // Alerta Roja
-                    document.getElementById('canvasZone').classList.add('flash-red');
-                    setTimeout(() => document.getElementById('canvasZone').classList.remove('flash-red'), 200);
-                } else if (p < 85) {
-                    color = "#ffcc00"; // Advertencia Amarilla
-                }
+            try {
+                const data = JSON.parse(event.data);
                 
-                ctx.strokeStyle = color;
-                cursor.style.borderColor = color;
-                cursor.style.boxShadow = `0 0 15px ${color}, inset 0 0 5px ${color}`;
-                precisionText.style.color = color;
-                gauge.style.stroke = color;
-            }
+                if (data.precision !== undefined) {
+                    const p = parseFloat(data.precision);
+                    precisionText.innerText = p.toFixed(1) + "%";
+                    
+                    // 🎯 Cálculo a prueba de fallos
+                    if (gauge) {
+                        // Leemos el radio de forma segura, si falla usamos 40 por defecto
+                        const r = parseFloat(gauge.getAttribute('r')) || 40;
+                        const circ = 2 * Math.PI * r;
+                        gauge.style.strokeDasharray = circ;
+                        gauge.style.strokeDashoffset = circ - (circ * (p / 100));
+                    }
 
-            if (data.feedback && data.feedback !== "Trazo Estable") {
-                log.innerHTML = `<div>[${new Date().toLocaleTimeString()}] ${data.feedback}</div>` + log.innerHTML;
-            }
-        };
+                    // Cambio de color reactivo
+                    let color = "#3affdd"; // Cian
+                    if (p < 60) {
+                        color = "#ff3131"; // Rojo
+                        const zone = document.getElementById('canvasZone');
+                        if(zone) {
+                            zone.classList.add('flash-red');
+                            setTimeout(() => zone.classList.remove('flash-red'), 200);
+                        }
+                    } else if (p < 85) {
+                        color = "#ffcc00"; // Amarillo
+                    }
+                    
+                    ctx.strokeStyle = color;
+                    if (cursor) {
+                        cursor.style.borderColor = color;
+                        cursor.style.boxShadow = `0 0 15px ${color}, inset 0 0 5px ${color}`;
+                    }
+                    precisionText.style.color = color;
+                    if (gauge) gauge.style.stroke = color;
+                }
 
-        wsIn.onclose = () => {
-            connected = false;
-            document.getElementById('wsLed').classList.remove('connected');
-            document.getElementById('wsStatus').innerText = 'offline';
-            btn.innerText = "🔌 RECONECTAR";
+                if (data.feedback && data.feedback !== "Trazo Estable") {
+                    log.innerHTML = `<div><span style="color:#666;">[${new Date().toLocaleTimeString()}]</span> ${data.feedback}</div>` + log.innerHTML;
+                }
+            } catch (err) {
+                // 🚨 SI ALGO EXPLOTA, NOS AVISA POR CONSOLA
+                console.error("🔥 Error crítico procesando datos de Celer:", err);
+            }
         };
     }
 
-    document.getElementById('connectBtn').onclick = connect;
-    document.getElementById('disconnectBtn').onclick = () => {
-        if(wsIn) wsIn.close();
-        if(wsOut) wsOut.close();
+    // --- FUNCIONES DE LIMPIEZA ---
+    function forceDisconnectUI() {
+        connected = false;
+        document.getElementById('wsLed').classList.remove('connected');
+        document.getElementById('wsStatus').innerText = 'offline';
+        document.getElementById('connectBtn').innerText = "🔌 CONECTAR WS";
+    }
+
+    document.getElementById('connectBtn').onclick = (e) => {
+        e.preventDefault(); // Bloquea cualquier recarga fantasma
+        connect();
     };
+    
+    document.getElementById('disconnectBtn').onclick = () => {
+        // Forzamos la UI a apagarse inmediatamente sin esperar al socket
+        forceDisconnectUI();
+        if(wsIn) { wsIn.close(); wsIn = null; }
+        if(wsOut) { wsOut.close(); wsOut = null; }
+        log.innerHTML = "<div>🛑 Desconectado manualmente.</div>" + log.innerHTML;
+    };
+
     document.getElementById('clearBtn').onclick = () => {
         clearCanvas();
         strokeCount = 0;
         document.getElementById('strokeCount').innerText = "0";
         precisionText.innerText = "—%";
-        gauge.style.strokeDashoffset = 251;
-        log.innerHTML = "Dojo reiniciado.";
+        
+        if (gauge) {
+            const radius = gauge.r.baseVal.value;
+            gauge.style.strokeDashoffset = 2 * Math.PI * radius; // Vaciar anillo
+        }
+        
+        log.innerHTML = "<div>🧹 Dojo reiniciado.</div>" + log.innerHTML;
     };
 
     initCanvas();
 </script>
-</body>
-</html>

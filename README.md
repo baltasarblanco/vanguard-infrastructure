@@ -1,13 +1,13 @@
-# 🛡️ VANGUARD: High-Performance Infrastructure Suite
+# 🛡️ Vanguard — Infrastructure Suite
 
-A bare-metal ecosystem built in **Rust** for ultra-low latency network processing, real-time threat detection, and deterministic storage.
+Rust ecosystem for L4 network processing, complex event detection, and high-write storage.
 
 ---
 
 ## 🏗️ The Architecture
 
 - **AEGIS**: A Layer 4 TCP Proxy utilizing `io_uring` and a Thread-per-Core model. It eliminates cross-core lock contention and minimizes syscall overhead.
-- **CELER**: A Complex Event Processing (CEP) engine processing **~85 Million Packets/Sec**. It uses zero-copy IPC and SPSC lock-free ring buffers with cache-line padding (64-byte) to prevent false sharing.
+- **CELER**: A Complex Event Processing (CEP) engine (lab peak 85 Mpps, sustained 28.97 Mpps). It uses zero-copy IPC...
 - **RYŪ**: Real-time telemetry dashboard with WebSocket streaming for instant L7 threat visualization.
 - **CHRONOS**: High-performance LSM-tree storage engine designed for high-write throughput.
 
@@ -24,7 +24,7 @@ A bare-metal ecosystem built in **Rust** for ultra-low latency network processin
               |           |           |           |             |  [ Zero-Copy  ]
        _______V___________V___________V___________V_____________V_________________
       |                                                                           |
-      |          CELER ENGINE (CEP) - 85 Mpps Centinel                            |
+      |          CELER ENGINE (CEP) - 28.97 Mpps sustained                            |
       |   [ Lock-Free Ring Buffer ] <--- [ Fast-Path IP Tracking (O(1)) ]         |
       |_________________|_______________________________________|_________________|
                         |                                       |
@@ -43,45 +43,20 @@ A bare-metal ecosystem built in **Rust** for ultra-low latency network processin
 
 ---
 
-## 🚀 Performance & Benchmarks
+## Repositories
 
-Theoretical Peak (Lab Environment)
+| Component | Repo | Numbers |
+|-----------|------|---------|
+| AEGIS (L4 TCP proxy) | [aegis-proxy](https://github.com/baltasarblanco/aegis-proxy) | 8.4k RPS, P99<1ms |
+| CELER (CEP engine) | [celer_mock](https://github.com/baltasarblanco/celer_mock) | 28.97 Mpps sustained, ~34.5 ns/event |
+| CHRONOS (KV store) | [chronos_lsm](https://github.com/baltasarblanco/chronos_lsm) | 15k reads/s, 10.5k writes/s |
+| RYŪ (dashboard) | this repo | WebSocket frontend live, backend pending |
 
-| Metric                | Value                      |
-|-----------------------|----------------------------|
-| IPC Throughput        | **85.37 Mpps** (wire-speed)|
-| Mitigation Latency    | `<12 ms` for 1M event burst|
-| Memory Profile        | **Deterministic**, zero-malloc during active attack mitigation |
+## Real-World Baseline (CELER)
+- Throughput: **28.97 Mpps** sustained over 100M events
+- Latency: **~34.5 ns** per packet
+- IPC: memfd_create + SCM_RIGHTS (zero-copy)
+- Hardware: Pop!_OS 22.04, Ryzen, core pinning (taskset -c 2,4)
 
-### 🚀 Real-World Baseline (Verified)
-- **Peak Throughput**: `28.97 Mpps` (Sustained over 100M events)
-- **Event Latency**: `~34.5 ns` per packet
-- **IPC Architecture**: `memfd_create` + `SCM_RIGHTS` (Zero-Copy)
-- **Environment**: Pop!_OS 22.04 | Ryzen | Core Pinning (`taskset -c 2,4`)
-
-``(Insert your telemetry screenshot here to show the 27.98 Mpps in action)``
-
----
-
-## 🔧 Getting Started
-
-```bash
-# Clone the repository
-git clone [https://github.com/baltasarblanco/vanguard-infrastructure](https://github.com/baltasarblanco/vanguard-infrastructure)
-cd vanguard-infrastructure
-
-# Build the workspace in release mode
-cargo build --release
-
-# Run components (In separate terminals)
-./target/release/chronos_lsm
-./target/release/celer_mock
-./target/release/aegis_proxy
-```
-    Note: Requires Linux kernel 6.x+ and io_uring support. See docs for detailed deployment guides.
-
-## 📄 License
-
-This project is licensed under the MIT License. See LICENSE for details.
-
-
+## License
+MIT

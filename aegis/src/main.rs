@@ -64,6 +64,7 @@ static SESSION_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    println!("📏 TAMADE DE EVENTO: {} bytes", std::mem::size_of::<ring_buffer::StrokeEvent>());
     println!("⚙️ [AEGIS CONTROL PLANE] Iniciando secuencia de arranque...");
 
     // =======================================================================
@@ -147,38 +148,59 @@ async fn main() {
                 while let Some(msg) = ws_receiver.next().await {
                     match msg {
                         Ok(Message::Binary(bin_data)) => {
-                            if bin_data.len() == 13 || bin_data.len() == 17 { 
-                                let x_bytes: [u8; 4] = bin_data[0..4].try_into().unwrap_or([0;4]);
-                                let y_bytes: [u8; 4] = bin_data[4..8].try_into().unwrap_or([0;4]);
-                                let flag = bin_data[12];
+                        println!("📦 Aegis recibió paquete de {} bytes", bin_data.len()); // <-- AGREGÁ ESTO
+                        if bin_data.len() == 13 || bin_data.len() == 17 {
+                            // 1. Extracción segura de coordenadas (Zero-copy style)
+                            let x = f32::from_le_bytes(bin_data[0..4].try_into().unwrap_or([0; 4]));
+                            let y = f32::from_le_bytes(bin_data[4..8].try_into().unwrap_or([0; 4]));
+                            
+                            // Si vienen 17 bytes, el 3er float es presión. Si no, 1.0 por defecto.
+                            let pressure = if bin_data.len() == 17 {
+                                f32::from_le_bytes(bin_data[8..12].try_into().unwrap_or([0; 4]))
+                            } else {
+                                1.0
+                            };
 
-                                let x = f32::from_le_bytes(x_bytes);
-                                let y = f32::from_le_bytes(y_bytes);
-                                
-                                let timestamp = SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_nanos() as u64;
+                            // El flag siempre es el byte 12 (en 13 bytes) o el byte 16 (en 17 bytes)
+                            let flag_index = bin_data.len() - 1;
+                            let flag = bin_data[flag_index];
 
-                                let action = match flag {
-                                    1 => 0, // start -> DOWN
-                                    0 => 1, // move -> MOVE
-                                    2 => 2, // end -> UP
-                                    _ => continue,
-                                };
-
-                                let event = ring_buffer::StrokeEvent {
-                                    session_id,
-                                    timestamp,
-                                    x,
-                                    y,
-                                    action,
-                                };
-
-                                if let Err(_) = producer_clone.push(event) {
-                                    eprintln!("⚠️ [AEGIS] Ring Buffer lleno.");
+                            // 2. Mapeo Táctico de Acciones (Normalización para CELER)
+                            let action = match flag {
+                                1 => 0, // start -> ACTION_DOWN
+                                0 => 1, // move  -> ACTION_MOVE
+                                2 => 2, // end   -> ACTION_UP
+                                _ => {
+                                    println!("⚠️ [AEGIS] Flag desconocido: {}", flag);
+                                    return; // Cambiamos continue por return si estamos en un bloque async
                                 }
+                            };
+
+                            // 3. Generación de Timestamp de alta resolución (Nanosegundos)
+                            let timestamp = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos() as u64;
+
+                            // 4. Construcción del Evento Cinético
+                            let event = ring_buffer::StrokeEvent {
+                                session_id: session_id as u32, // Aseguramos que sea u32 para el Buffer
+                                timestamp,
+                                x,
+                                y,
+                                pressure,
+                                action,
+                            };
+
+                            // 5. Inyección al Ring Buffer (Memoria Compartida)
+                            if let Err(_) = producer_clone.push(event) {
+                                // Si el buffer se llena, es que Celer está saturado o colgado
+                                eprintln!("🚨 [AEGIS] Ring Buffer SATURADO. Celer no procesa.");
+                            } else {
+                                // Descomentá esta línea solo para testeo, satura la terminal
+                                // println!("✅ Evento {} enviado a Celer", action);
                             }
+}
                         }
                         Ok(Message::Close(_)) => {
                             println!("🛑 [AEGIS RYŪ] Discípulo {} desconectado.", session_id);

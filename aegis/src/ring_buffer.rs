@@ -15,6 +15,7 @@ pub struct StrokeEvent {
     pub timestamp: u64,  // Marca de tiempo en nanosegundos
     pub x: f32,          // Precisión simple para cálculo vectorial rápido
     pub y: f32,
+    pub pressure: f32, // 🎯 AGREGÁ ESTA LÍNEA
     pub action: u8,      // 0: Down (Inicio), 1: Move (Trazo), 2: Up (Fin)
     
     // El compilador de Rust rellenará automáticamente el resto 

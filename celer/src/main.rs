@@ -37,8 +37,9 @@ struct SessionState {
     last_x: f32, last_y: f32,
     last_dx: f32, last_dy: f32,
     last_timestamp: u64,
+    smoothed_precision: f32, // <--- Nueva: Inercia de precisión
+    last_feedback_time: u64, // <--- Nueva: Para no saturar la web
 }
-
 // Campos sincronizados con el Frontend RYŪ v2.2
 #[derive(Clone, Serialize)]
 struct PrecisionEvent {
@@ -50,46 +51,52 @@ struct PrecisionEvent {
 
 #[tokio::main]
 async fn main() {
-    // Canal para transmitir el juicio de Celer hacia el WebSocket
+    println!("📏 TAMAÑO DE EVENTO: {} bytes", std::mem::size_of::<ring_buffer::StrokeEvent>());
+    
+    // 1. Canal de Telemetría (Broadcast para múltiples pestañas de Chrome/Firefox)
     let (tx, _) = broadcast::channel::<PrecisionEvent>(2048);
     let tx_for_core = tx.clone(); 
 
-    // 1. MONITOR DE RENDIMIENTO (Terminal)
+    // 2. MONITOR DE RENDIMIENTO (Terminal HUD)
     std::thread::spawn(move || {
         let mut last_count = 0;
         let mut last_time = Instant::now();
-        let stdout = io::stdout();
-        let mut handle = stdout.lock();
-        write!(handle, "\x1B[2J\x1B[H").unwrap(); 
+        
         loop {
             std::thread::sleep(Duration::from_millis(250)); 
             let current_count = EVENTS_PROCESSED.load(Ordering::Relaxed);
             let current_time = Instant::now();
             let delta_events = current_count.saturating_sub(last_count);
             let delta_time = current_time.duration_since(last_time).as_secs_f64();
+            
             if delta_time > 0.0 {
-                let mpps = (delta_events as f64 / delta_time) / 1_000_000.0;
-                write!(handle, "\x1B[H").unwrap(); 
+                // 🎯 CAMBIAMOS LA MATEMÁTICA: Ahora son Paquetes Por Segundo (Pps)
+                let pps = delta_events as f64 / delta_time;
+                
+                let stdout = io::stdout();
+                let mut handle = stdout.lock();
+                
+                write!(handle, "\x1B[2J\x1B[H").unwrap(); 
                 writeln!(handle, "========================================").unwrap();
                 writeln!(handle, "     🐉 RYŪ: PRECISION ANALYZER         ").unwrap();
                 writeln!(handle, "========================================").unwrap();
                 writeln!(handle, "Status:      \x1B[32mSTREAMING MODEL\x1B[0m").unwrap();
-                writeln!(handle, "Throughput:  \x1B[32m{:>12.2} Mpps\x1B[0m", mpps).unwrap();
+                // 🎯 CAMBIAMOS LA ETIQUETA A Pps
+                writeln!(handle, "Throughput:  \x1B[32m{:>12.2} Pps\x1B[0m", pps).unwrap();
                 writeln!(handle, "----------------------------------------").unwrap();
-                handle.flush().unwrap();
             }
             last_count = current_count;
             last_time = current_time;
         }
     });
 
-    // 2. MOTOR CINEMÁTICO (Hot Loop IPC)
+    // 3. MOTOR CINEMÁTICO (Hot Loop IPC - Memoria Compartida)
     thread::spawn(move || {
         let socket_path = "/tmp/celer_bridge.sock";
         let _ = remove_file(socket_path);
         let listener = UnixListener::bind(socket_path).unwrap();
         
-        // El servidor web arrancará, pero este hilo esperará a AEGIS
+        println!("⏳ [CELER IPC] Esperando handshake de AEGIS...");
         let (stream, _) = listener.accept().expect("Fallo al conectar con AEGIS");
         
         let mut iov_buf = [0u8; 4];
@@ -100,100 +107,119 @@ async fn main() {
         if let Some(ControlMessageOwned::ScmRights(fds)) = msg.cmsgs().next() { received_fd = fds[0]; }
 
         let file = unsafe { File::from_raw_fd(received_fd) };
-        let mut mmap = unsafe { MmapMut::map_mut(&file).unwrap() };
-        let ring_ptr = mmap.as_mut_ptr() as *mut ring_buffer::SharedRing;
+        let mmap = unsafe { MmapMut::map_mut(&file).unwrap() };
+        let ring_ptr = mmap.as_ptr() as *mut ring_buffer::SharedRing;
         let mut consumer = unsafe { ring_buffer::CelerConsumer::new(ring_ptr) };
 
-        let mut fsm_pool = vec![SessionState { active: false, last_x: 0.0, last_y: 0.0, last_dx: 0.0, last_dy: 0.0, last_timestamp: 0 }; SESSION_POOL_SIZE];
+        let mut fsm_pool: Vec<SessionState> = vec![
+            SessionState { 
+                active: false, last_x: 0.0, last_y: 0.0, last_dx: 0.0, last_dy: 0.0, 
+                last_timestamp: 0, smoothed_precision: 100.0, last_feedback_time: 0      
+            }; 
+            SESSION_POOL_SIZE
+        ];
+    
+        // 🔍 CONTADOR DE DEBUG INYECTADO
+        let mut pop_attempts = 0u64; 
 
         loop {
+            // Latido del motor (Silenciado para no romper el HUD)
+            pop_attempts = pop_attempts.wrapping_add(1);
+            // if pop_attempts % 10_000_000 == 0 {
+            //     println!("🔍 [CELER DEBUG] Motor girando... ({} M ciclos sin datos)", pop_attempts / 1_000_000);
+            // }
+
             if let Some(event) = consumer.pop() {
+                // 🚨 EVENTO RECIBIDO (Silenciado para que el HUD brille sin interrupciones) 🚨
+                // println!("🎯 [CELER] ¡EVENTO RECIBIDO! Session: {}, Acción: {}, X: {:.1}", event.session_id, event.action, event.x);
+
                 EVENTS_PROCESSED.fetch_add(1, Ordering::Relaxed);
                 let state = &mut fsm_pool[(event.session_id as usize) & SESSION_MASK];
 
                 match event.action {
-                    ACTION_DOWN => {
-                        *state = SessionState { active: true, last_x: event.x, last_y: event.y, last_dx: 0.0, last_dy: 0.0, last_timestamp: event.timestamp };
-                    }
                     ACTION_MOVE => {
                         if state.active {
                             let dx = event.x - state.last_x;
                             let dy = event.y - state.last_y;
                             let dist = dx.hypot(dy);
-                            let dt = event.timestamp.saturating_sub(state.last_timestamp);
 
-                            if dist > 0.6 && dt > 0 {
-                                let speed = dist / (dt as f32);
-                                let nx = dx / dist; 
-                                let ny = dy / dist;
+                            // 🚨 BYPASS: Dejamos pasar CUALQUIER movimiento mayor a 0 píxeles
+                            if dist > 0.0 { 
+                                // Hacemos un cálculo de precisión falso/aleatorio solo para probar la UI
+                                let mut instant_precision = if dist > 5.0 { 95.0 } else { 45.0 };
+                                
+                                let alpha = 0.15;
+                                state.smoothed_precision = (instant_precision * alpha) + (state.smoothed_precision * (1.0 - alpha));
 
-                                let mut precision = 100.0;
-                                let mut feedback = "Trazo Maestro".to_string();
-
-                                if state.last_dx != 0.0 {
-                                    let dot = (nx * state.last_dx) + (ny * state.last_dy);
-                                    precision = ((dot + 1.0) / 2.0) * 100.0;
-                                    
-                                    feedback = match precision {
-                                        p if p > 94.0 => "🎯 Alineación Perfecta".to_string(),
-                                        p if p > 75.0 => "🟢 Estabilidad Óptima".to_string(),
-                                        p if p > 55.0 => "🟡 Pulso Inestable".to_string(),
-                                        _ => "🔴 Error de Precisión".to_string(),
-                                    };
-                                }
-
-                                if speed > SPEED_THRESHOLD {
-                                    feedback = "⚠️ Velocidad Excesiva".to_string();
-                                    precision = (precision - 15.0).max(0.0);
-                                }
+                                // 🚨 BYPASS: Forzamos el envío ignorando el límite de 15ms
+                                println!("📡 [CELER] Mandando al anillo: {:.1}%", state.smoothed_precision);
 
                                 let _ = tx_for_core.send(PrecisionEvent {
                                     session_id: event.session_id,
-                                    precision,
-                                    feedback,
-                                    speed,
+                                    precision: state.smoothed_precision,
+                                    feedback: "🟢 Bypass Activado".to_string(),
+                                    speed: dist,
                                 });
 
-                                state.last_dx = nx; state.last_dy = ny;
-                                state.last_x = event.x; state.last_y = event.y;
-                                state.last_timestamp = event.timestamp;
+                                state.last_x = event.x; 
+                                state.last_y = event.y;
                             }
                         }
                     }
                     ACTION_UP => { state.active = false; }
                     _ => {}
                 }
-            } else { std::hint::spin_loop(); }
+            } else { 
+                std::hint::spin_loop(); 
+            } 
         }
     });
 
-    // 3. SERVIDOR RYŪ (WEB + WEBSOCKET)
-    let html_content = include_str!("index.html");
+    // 4. SERVIDOR DE TELEMETRÍA (Warp + WebSocket + CORS)
+    let cors = warp::cors()
+        .allow_any_origin()
+        .allow_methods(vec!["GET", "POST", "DELETE"])
+        .allow_headers(vec!["content-type"]);
 
-    // Servir el HTML en la raíz
-    let index_route = warp::get()
-        .and(warp::path::end())
-        .map(move || warp::reply::html(html_content));
-
-    // Servir el WebSocket de Telemetría
-    let tx_ws = tx.clone();
     let ws_route = warp::path("ws")
         .and(warp::ws())
-        .and(warp::any().map(move || tx_ws.clone()))
+        .and(warp::any().map(move || tx.clone()))
         .map(|ws: warp::ws::Ws, tx: broadcast::Sender<PrecisionEvent>| {
             ws.on_upgrade(move |socket| async move {
                 let (mut ws_tx, _) = socket.split();
                 let mut rx = tx.subscribe();
-                while let Ok(event) = rx.recv().await {
-                    let msg = serde_json::to_string(&event).unwrap();
-                    if ws_tx.send(warp::ws::Message::text(msg)).await.is_err() { break; }
+                
+                // 🛡️ BUCLE BLINDADO ANTI-SATURACIÓN
+                loop {
+                    match rx.recv().await {
+                        Ok(event) => {
+                            if let Ok(msg) = serde_json::to_string(&event) {
+                                if ws_tx.send(warp::ws::Message::text(msg)).await.is_err() { 
+                                    break; // El navegador se cerró
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // 🚀 Si hay demasiados datos, ignoramos los viejos y seguimos
+                            continue; 
+                        }
+                        Err(_) => {
+                            break; // El canal principal murió
+                        }
+                    }
                 }
             })
         });
 
-    let routes = index_route.or(ws_route);
+    // 🚨 RUTA DE PRUEBA (Para saber si Warp está vivo en el navegador)
+    let ping_route = warp::path::end().map(|| "¡RYŪ DOJO: WARP ESTÁ VIVO!");
 
-    println!("🚀 RYŪ DOJO ONLINE | URL: http://localhost:3030");
-    // Bind global en 0.0.0.0 para que Firefox no falle
-    warp::serve(routes).run(([0, 0, 0, 0], CELER_PORT)).await;
+    let routes = ws_route.or(ping_route).with(cors);
+
+    println!("🚀 RYŪ DOJO ONLINE | HTTP y WS en puerto 3031");
+    
+    // MUDANZA AL PUERTO 3031
+    warp::serve(routes)
+        .run(([0, 0, 0, 0], 3031))
+        .await;
 }
