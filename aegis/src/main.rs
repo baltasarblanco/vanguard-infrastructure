@@ -27,8 +27,8 @@ use tokio::time::{interval, Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const BIND_ADDR: &str = "0.0.0.0:8081";      
-const CHRONOS_ADDR: &str = "127.0.0.1:8080"; 
+const BIND_ADDR: &str = "0.0.0.0:8081";
+const CHRONOS_ADDR: &str = "127.0.0.1:8080";
 const TCP_BACKLOG: i32 = 4096;
 const BUFFER_SIZE: usize = 4096;
 const POOL_CAPACITY: usize = 1024;
@@ -71,7 +71,7 @@ async fn main() {
     // 🌉 PUENTE FANTASMA IPC & RING BUFFER (AEGIS -> CELER)
     // =======================================================================
     println!("🌉 [AEGIS IPC] Forjando memoria compartida (memfd)...");
-    
+
     let celer_name = CString::new("celer_bridge").unwrap();
     let fd = memfd_create(celer_name.as_c_str(), MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING)
         .expect("Fallo al crear memfd");
@@ -87,7 +87,7 @@ async fn main() {
     let ring_ptr = celer_mmap.as_mut_ptr() as *mut SharedRing;
     let producer = unsafe { AegisProducer::new(ring_ptr) };
 
-    let raw_fd = fd.into_raw_fd(); 
+    let raw_fd = fd.into_raw_fd();
 
     // HILO 1: El Centinela (Pasa el File Descriptor a CELER)
     thread::spawn(move || {
@@ -106,9 +106,9 @@ async fn main() {
             }
         };
 
-        let iov = [std::io::IoSlice::new(b"ping")]; 
+        let iov = [std::io::IoSlice::new(b"ping")];
         let cmsgs = [ControlMessage::ScmRights(&[raw_fd])];
-        
+
         match sendmsg::<()>(stream.as_raw_fd(), &iov, &cmsgs, MsgFlags::empty(), None) {
             Ok(_) => println!("✅ [AEGIS IPC] ¡Conexión establecida! File Descriptor transferido a CELER."),
             Err(e) => eprintln!("❌ [AEGIS IPC] Fallo crítico al inyectar el FD: {}", e),
@@ -118,12 +118,12 @@ async fn main() {
     // =======================================================================
     // ⛩️ HILO 2: EL DOJO WEBSOCKET
     // =======================================================================
-    let producer_ptr = Box::into_raw(Box::new(producer)) as usize; 
+    let producer_ptr = Box::into_raw(Box::new(producer)) as usize;
 
     tokio::spawn(async move {
         // Le damos tiempo a CELER para que se conecte
-        tokio::time::sleep(Duration::from_secs(2)).await; 
-        
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
         // 🔥 ACÁ ESTÁ EL CAMBIO: Puerto 9090 para no chocar
         let ws_addr = "0.0.0.0:9090";
         let listener = tokio::net::TcpListener::bind(&ws_addr).await.expect("Error WS bind");
@@ -154,7 +154,7 @@ async fn main() {
                             // 1. Extracción segura de coordenadas (Zero-copy style)
                             let x = f32::from_le_bytes(bin_data[0..4].try_into().unwrap_or([0; 4]));
                             let y = f32::from_le_bytes(bin_data[4..8].try_into().unwrap_or([0; 4]));
-                            
+
                             // Si vienen 17 bytes, el 3er float es presión. Si no, 1.0 por defecto.
                             let pressure = if bin_data.len() == 17 {
                                 f32::from_le_bytes(bin_data[8..12].try_into().unwrap_or([0; 4]))
@@ -191,6 +191,9 @@ async fn main() {
                                 y,
                                 pressure,
                                 action,
+                                // Sentinel W3C "no trace" hasta que el commit siguiente
+                                // abra el span de OTel y lo pueble con TraceId real.
+                                trace_id: [0u8; 16],
                             };
 
                             // 5. Inyección al Ring Buffer (Memoria Compartida)
@@ -207,7 +210,7 @@ async fn main() {
                             println!("🛑 [AEGIS RYŪ] Discípulo {} desconectado.", session_id);
                             break;
                         }
-                        _ => {} 
+                        _ => {}
                     }
                 }
             });
@@ -233,7 +236,7 @@ async fn main() {
 
         let handle = thread::spawn(move || {
             core_affinity::set_for_current(core_id);
-            
+
             let mut local_pool = VecDeque::with_capacity(POOL_CAPACITY);
             for _ in 0..POOL_CAPACITY {
                 local_pool.push_back(Vec::with_capacity(BUFFER_SIZE));
@@ -250,7 +253,7 @@ async fn main() {
             socket.bind(&addr.into()).unwrap();
             socket.listen(TCP_BACKLOG).unwrap();
             let std_listener: StdTcpListener = socket.into();
-            
+
             tokio_uring::start(async move {
                 let listener = TcpListener::from_std(std_listener);
                 println!("🚀 [AEGIS-CORE-{}] Motor y Tuberías encendidas.", core_id.id);
@@ -262,13 +265,13 @@ async fn main() {
                                 let pool_ref = pool.clone();
                                 let conn_pool_ref = conn_pool.clone();
                                 let task_telemetry = tele_clone.clone();
-                                
+
                                 tokio_uring::spawn(async move {
                                     let _guard = ConnectionGuard::new(task_telemetry.clone());
 
                                     let mut buf = pool_ref.borrow_mut().pop_front()
                                         .unwrap_or_else(|| Vec::with_capacity(BUFFER_SIZE));
-                                    buf.clear(); 
+                                    buf.clear();
 
                                     let chronos_stream = if let Some(hot_pipe) = conn_pool_ref.borrow_mut().pop_front() {
                                         hot_pipe
@@ -290,10 +293,10 @@ async fn main() {
                                             task_telemetry.total_bytes.0.fetch_add(n, Ordering::Relaxed);
 
                                             let (write_res, mut buf_written) = chronos_stream.write_all(buf_read).await;
-                                            
+
                                             if write_res.is_ok() {
-                                                buf_written.clear(); 
-                                                
+                                                buf_written.clear();
+
                                                 let (resp_res, buf_resp) = chronos_stream.read(buf_written).await;
 
                                                 if let Ok(resp_n) = resp_res {
@@ -302,9 +305,9 @@ async fn main() {
 
                                                         let (_final_res, mut buf_final) = stream.write_all(buf_resp).await;
                                                         buf_final.clear();
-    
+
                                                         task_telemetry.total_requests.0.fetch_add(1, Ordering::Relaxed);
-                                                        
+
                                                         pool_ref.borrow_mut().push_back(buf_final);
                                                         if conn_pool_ref.borrow().len() < MAX_HOT_PIPES {
                                                             conn_pool_ref.borrow_mut().push_back(chronos_stream);
@@ -351,11 +354,11 @@ async fn main() {
                 tokio::spawn(async move {
                     let mut buf = [0; 512];
                     let _ = stream.read(&mut buf).await;
-                    
+
                     let conns = tele.active_connections.0.load(Ordering::Relaxed);
                     let bytes = tele.total_bytes.0.load(Ordering::Relaxed);
                     let reqs = tele.total_requests.0.load(Ordering::Relaxed);
-    
+
                     let response = format!(
                         "HTTP/1.1 200 OK\r\n\
                         Content-Type: text/plain; version=0.0.4\r\n\
@@ -371,7 +374,7 @@ async fn main() {
                         aegis_total_requests {}\n",
                         conns, bytes, reqs
                     );
-                    
+
                     let _ = stream.write_all(response.as_bytes()).await;
                 });
             }
@@ -390,14 +393,14 @@ async fn main() {
                 let conns = telemetry.active_connections.0.load(Ordering::Relaxed);
                 let bytes = telemetry.total_bytes.0.load(Ordering::Relaxed);
                 let mb = bytes as f64 / 1_048_576.0;
-                
+
                 if conns > 0 || bytes > 0 {
                     println!("📊 [HUD] Conexiones: {} | Tráfico: {:.4} MB", conns, mb);
                 }
             }
         }
     }
-    
+
     let _ = shutdown_tx.send(());
     for handle in handles {
         handle.join().unwrap();

@@ -17,8 +17,13 @@ const INDEX_MASK: usize = RING_CAPACITY - 1;
 /// Evento escrito por AEGIS y leído por CELER.
 ///
 /// Alineado a 64 bytes (una línea de caché L1). El compilador agrega padding
-/// invisible después de `action` para llegar al tamaño total. El layout está
+/// invisible después de `trace_id` para llegar al tamaño total. El layout está
 /// fijado por `tests::abi_contract_truth_serum`.
+///
+/// `trace_id` es el trace-id de W3C traceparent (16 bytes). Se almacena como
+/// `[u8; 16]` (no `u128`) para que el wire format sea endianness-agnostic y
+/// match directo con la API de `opentelemetry::trace::TraceId::{to_bytes,
+/// from_bytes}`. El valor `[0u8; 16]` se interpreta como "sin trace activo".
 #[repr(C, align(64))]
 #[derive(Debug, Clone, Copy)]
 pub struct StrokeEvent {
@@ -28,6 +33,7 @@ pub struct StrokeEvent {
     pub y: f32,
     pub pressure: f32,
     pub action: u8,
+    pub trace_id: [u8; 16],
 }
 
 /// Acolchado de línea de caché para prevenir false sharing entre `head` y `tail`.
@@ -153,6 +159,7 @@ mod tests {
         assert_eq!(offset_of!(StrokeEvent, y), 20);
         assert_eq!(offset_of!(StrokeEvent, pressure), 24);
         assert_eq!(offset_of!(StrokeEvent, action), 28);
+        assert_eq!(offset_of!(StrokeEvent, trace_id), 29);
     }
 
     #[test]
@@ -173,6 +180,7 @@ mod tests {
         let mut producer = unsafe { AegisProducer::new(ptr) };
         let mut consumer = unsafe { CelerConsumer::new(ptr) };
 
+        let trace = [0xab; 16];
         let evt = StrokeEvent {
             session_id: 42,
             timestamp: 1_700_000_000_000_000_000,
@@ -180,6 +188,7 @@ mod tests {
             y: 200.25,
             pressure: 0.7,
             action: 1,
+            trace_id: trace,
         };
         producer.push(evt).expect("push should succeed");
 
@@ -189,6 +198,7 @@ mod tests {
         assert_eq!(read.y, 200.25);
         assert_eq!(read.pressure, 0.7);
         assert_eq!(read.action, 1);
+        assert_eq!(read.trace_id, trace, "trace_id debe sobrevivir el roundtrip byte a byte");
 
         assert!(consumer.pop().is_none(), "ring debería estar vacío");
 
