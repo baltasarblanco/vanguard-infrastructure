@@ -1,6 +1,4 @@
 #![allow(dead_code)]
-mod lexer;
-mod ast;
 
 use shared_ipc::{CelerConsumer, SharedRing};
 
