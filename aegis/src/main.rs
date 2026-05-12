@@ -16,7 +16,7 @@ use std::thread;
 use tokio::sync::broadcast;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
-use futures_util::{StreamExt, SinkExt};
+use futures_util::StreamExt;
 use tokio_uring::net::TcpListener;
 use std::cell::RefCell;
 use std::collections::VecDeque;
