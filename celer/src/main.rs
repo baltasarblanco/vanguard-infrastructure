@@ -20,6 +20,12 @@ use tokio::sync::broadcast;
 use serde::Serialize;
 use futures_util::{SinkExt, StreamExt}; 
 
+use opentelemetry::trace::{
+    SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
+};
+use opentelemetry::Context as OtelContext;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
 // --- CONFIGURACIÓN TÁCTICA ---
 const CELER_PORT: u16 = 9030;
 const SESSION_POOL_SIZE: usize = 65536;
@@ -132,10 +138,39 @@ async fn main() {
             // }
 
             if let Some(event) = consumer.pop() {
-                // 🚨 EVENTO RECIBIDO (Silenciado para que el HUD brille sin interrupciones) 🚨
-                // println!("🎯 [CELER] ¡EVENTO RECIBIDO! Session: {}, Acción: {}, X: {:.1}", event.session_id, event.action, event.x);
-
                 EVENTS_PROCESSED.fetch_add(1, Ordering::Relaxed);
+
+                // Rebuild OTel parent context from W3C wire format embedded
+                // in the StrokeEvent. If either field is the invalid sentinel
+                // ([0u8; N]), fall back to the current local context — this
+                // covers microbench paths and any legacy producer that pushes
+                // events without an active tracing span.
+                let trace_id = TraceId::from_bytes(event.trace_id);
+                let parent_span_id = SpanId::from_bytes(event.parent_span_id);
+
+                let parent_ctx = if trace_id != TraceId::INVALID
+                    && parent_span_id != SpanId::INVALID
+                {
+                    let parent_sc = SpanContext::new(
+                        trace_id,
+                        parent_span_id,
+                        TraceFlags::SAMPLED,
+                        true, // is_remote: crossed process boundary via shmem
+                        TraceState::default(),
+                    );
+                    OtelContext::new().with_remote_span_context(parent_sc)
+                } else {
+                    OtelContext::current()
+                };
+
+                let span = tracing::info_span!(
+                    "celer.process_stroke",
+                    session_id = event.session_id,
+                    action = event.action,
+                );
+                span.set_parent(parent_ctx);
+                let _enter = span.enter();
+
                 let state = &mut fsm_pool[(event.session_id as usize) & SESSION_MASK];
 
                 match event.action {
