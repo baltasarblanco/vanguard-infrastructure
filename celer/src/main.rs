@@ -160,7 +160,6 @@ async fn main() {
                                 state.smoothed_precision =
                                     (instant_precision * alpha) + (state.smoothed_precision * (1.0 - alpha));
 
-                                println!("📡 [CELER] Mandando al anillo: {:.1}%", state.smoothed_precision);
 
                                 let _ = tx_for_core.send(PrecisionEvent {
                                     session_id: event.session_id,
