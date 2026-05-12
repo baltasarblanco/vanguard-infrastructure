@@ -27,6 +27,8 @@ use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::time::{SystemTime, UNIX_EPOCH};
+use opentelemetry::trace::TraceContextExt;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 const BIND_ADDR: &str = "0.0.0.0:8081";
 const CHRONOS_ADDR: &str = "127.0.0.1:8080";
@@ -151,8 +153,18 @@ async fn main() {
                 while let Some(msg) = ws_receiver.next().await {
                     match msg {
                         Ok(Message::Binary(bin_data)) => {
-                        println!("📦 Aegis recibió paquete de {} bytes", bin_data.len()); // <-- AGREGÁ ESTO
                         if bin_data.len() == 13 || bin_data.len() == 17 {
+                            // Span por mensaje. Capturamos trace_id Y span_id del
+                            // contexto; ambos viajan con el StrokeEvent hasta CELER,
+                            // donde se reconstruye un SpanContext "remoto" para que
+                            // el span de CELER quede anidado como hijo en Jaeger.
+                            let span = tracing::info_span!(
+                                "aegis.recv_stroke",
+                                session_id = session_id,
+                                payload_bytes = bin_data.len(),
+                            );
+                            let _enter = span.enter();
+
                             // 1. Extracción segura de coordenadas (Zero-copy style)
                             let x = f32::from_le_bytes(bin_data[0..4].try_into().unwrap_or([0; 4]));
                             let y = f32::from_le_bytes(bin_data[4..8].try_into().unwrap_or([0; 4]));
@@ -174,8 +186,8 @@ async fn main() {
                                 0 => 1, // move  -> ACTION_MOVE
                                 2 => 2, // end   -> ACTION_UP
                                 _ => {
-                                    println!("⚠️ [AEGIS] Flag desconocido: {}", flag);
-                                    return; // Cambiamos continue por return si estamos en un bloque async
+                                    tracing::warn!(flag, "AEGIS: flag de WebSocket desconocido");
+                                    return;
                                 }
                             };
 
@@ -185,29 +197,33 @@ async fn main() {
                                 .unwrap_or_default()
                                 .as_nanos() as u64;
 
-                            // 4. Construcción del Evento Cinético
+                            // 4. Captura del SpanContext completo: trace_id (mismo
+                            //    en todos los spans del árbol) + span_id (identifica
+                            //    este span concreto, que pasará a ser parent_span_id
+                            //    en CELER).
+                            let parent_context = span.context();
+                            let span_ref = parent_context.span();
+                            let sc = span_ref.span_context();
+                            let trace_id = sc.trace_id().to_bytes();
+                            let parent_span_id = sc.span_id().to_bytes();
+
+                            // 5. Construcción del Evento Cinético
                             let event = StrokeEvent {
-                                session_id: session_id as u32, // Aseguramos que sea u32 para el Buffer
+                                session_id: session_id as u32,
                                 timestamp,
                                 x,
                                 y,
                                 pressure,
                                 action,
-                                // Sentinel W3C "no trace" hasta que el commit siguiente
-                                // abra el span de OTel y lo pueble con TraceId real.
-                                trace_id: [0u8; 16],
-                                parent_span_id: [0u8; 8],
+                                trace_id,
+                                parent_span_id,
                             };
 
-                            // 5. Inyección al Ring Buffer (Memoria Compartida)
-                            if let Err(_) = producer_clone.push(event) {
-                                // Si el buffer se llena, es que Celer está saturado o colgado
-                                eprintln!("🚨 [AEGIS] Ring Buffer SATURADO. Celer no procesa.");
-                            } else {
-                                // Descomentá esta línea solo para testeo, satura la terminal
-                                // println!("✅ Evento {} enviado a Celer", action);
+                            // 6. Inyección al Ring Buffer (Memoria Compartida)
+                            if producer_clone.push(event).is_err() {
+                                tracing::warn!("AEGIS: Ring Buffer SATURADO, CELER no procesa");
                             }
-}
+                        }
                         }
                         Ok(Message::Close(_)) => {
                             println!("🛑 [AEGIS RYŪ] Discípulo {} desconectado.", session_id);
