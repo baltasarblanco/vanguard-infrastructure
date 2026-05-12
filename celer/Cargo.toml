@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+shared-ipc = { path = "../shared-ipc" }
 tokio = { workspace = true, features = ["full"] }
 nix = { workspace = true }
 memmap2 = { workspace = true }

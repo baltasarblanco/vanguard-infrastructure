@@ -8,6 +8,7 @@ members = [
     "celer",
     "chronos",
     "prototypes/ryuu_backend",
+    "shared-ipc",                  # ← agregado
 ]
 
 [workspace.dependencies]

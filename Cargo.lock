@@ -14,6 +14,7 @@ dependencies = [
  "futures-util",
  "memmap2",
  "nix 0.27.1",
+ "shared-ipc",
  "socket2 0.6.3",
  "tokio",
  "tokio-tungstenite 0.29.0",
@@ -102,6 +103,7 @@ dependencies = [
  "nix 0.27.1",
  "serde",
  "serde_json",
+ "shared-ipc",
  "tokio",
  "warp",
 ]
@@ -866,6 +868,10 @@ dependencies = [
  "cpufeatures",
  "digest",
 ]
+
+[[package]]
+name = "shared-ipc"
+version = "0.1.0"
 
 [[package]]
 name = "signal-hook-registry"

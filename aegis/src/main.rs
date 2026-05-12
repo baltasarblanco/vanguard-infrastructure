@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-mod ring_buffer;
+use shared_ipc::{AegisProducer, SharedRing, StrokeEvent};
 
 use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
 use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
@@ -64,7 +64,7 @@ static SESSION_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    println!("📏 TAMADE DE EVENTO: {} bytes", std::mem::size_of::<ring_buffer::StrokeEvent>());
+    println!("📏 TAMAÑO DE EVENTO: {} bytes", std::mem::size_of::<StrokeEvent>());
     println!("⚙️ [AEGIS CONTROL PLANE] Iniciando secuencia de arranque...");
 
     // =======================================================================
@@ -76,7 +76,7 @@ async fn main() {
     let fd = memfd_create(celer_name.as_c_str(), MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING)
         .expect("Fallo al crear memfd");
 
-    let ring_size = std::mem::size_of::<ring_buffer::SharedRing>() as i64; 
+    let ring_size = std::mem::size_of::<SharedRing>() as i64;
     ftruncate(&fd, ring_size).expect("Fallo al dimensionar la memoria IPC");
 
     fcntl(fd.as_raw_fd(), FcntlArg::F_ADD_SEALS(SealFlag::F_SEAL_SHRINK | SealFlag::F_SEAL_GROW))
@@ -84,8 +84,8 @@ async fn main() {
 
     let mut celer_mmap = unsafe { MmapMut::map_mut(&fd).expect("Fallo al mapear IPC") };
 
-    let ring_ptr = celer_mmap.as_mut_ptr() as *mut ring_buffer::SharedRing;
-    let producer = unsafe { ring_buffer::AegisProducer::new(ring_ptr) };
+    let ring_ptr = celer_mmap.as_mut_ptr() as *mut SharedRing;
+    let producer = unsafe { AegisProducer::new(ring_ptr) };
 
     let raw_fd = fd.into_raw_fd(); 
 
@@ -131,7 +131,8 @@ async fn main() {
 
         while let Ok((stream, _)) = listener.accept().await {
             let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-            let mut producer_clone = unsafe { (*(producer_ptr as *mut ring_buffer::AegisProducer)).clone() };
+            let mut producer_clone = unsafe { (*(producer_ptr as *mut AegisProducer)).clone() };
+
 
             tokio::spawn(async move {
                 let ws_stream = match accept_async(stream).await {
@@ -183,7 +184,7 @@ async fn main() {
                                 .as_nanos() as u64;
 
                             // 4. Construcción del Evento Cinético
-                            let event = ring_buffer::StrokeEvent {
+                            let event = StrokeEvent {
                                 session_id: session_id as u32, // Aseguramos que sea u32 para el Buffer
                                 timestamp,
                                 x,
