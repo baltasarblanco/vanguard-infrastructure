@@ -196,6 +196,7 @@ async fn main() {
                                 // Sentinel W3C "no trace" hasta que el commit siguiente
                                 // abra el span de OTel y lo pueble con TraceId real.
                                 trace_id: [0u8; 16],
+                                parent_span_id: [0u8; 8],
                             };
 
                             // 5. Inyección al Ring Buffer (Memoria Compartida)

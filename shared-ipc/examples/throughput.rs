@@ -36,7 +36,8 @@ fn make_event(i: u64) -> StrokeEvent {
         y: 0.0,
         pressure: 1.0,
         action: 1,
-        trace_id: [0u8; 16], // microbench sin OTel: sentinel W3C "no trace"
+        trace_id: [0u8; 16],       // microbench sin OTel: sentinel W3C "no trace"
+        parent_span_id: [0u8; 8],  // y "no parent"
     }
 }
 

@@ -17,13 +17,17 @@ const INDEX_MASK: usize = RING_CAPACITY - 1;
 /// Evento escrito por AEGIS y leído por CELER.
 ///
 /// Alineado a 64 bytes (una línea de caché L1). El compilador agrega padding
-/// invisible después de `trace_id` para llegar al tamaño total. El layout está
-/// fijado por `tests::abi_contract_truth_serum`.
+/// invisible después de `parent_span_id` para llegar al tamaño total. El layout
+/// está fijado por `tests::abi_contract_truth_serum`.
 ///
-/// `trace_id` es el trace-id de W3C traceparent (16 bytes). Se almacena como
-/// `[u8; 16]` (no `u128`) para que el wire format sea endianness-agnostic y
-/// match directo con la API de `opentelemetry::trace::TraceId::{to_bytes,
-/// from_bytes}`. El valor `[0u8; 16]` se interpreta como "sin trace activo".
+/// W3C SpanContext propagado en dos campos, ambos `[u8; N]` para wire format
+/// endianness-agnóstico y match directo con la API de
+/// `opentelemetry::trace::TraceId` / `opentelemetry::trace::SpanId`:
+///   - `trace_id`: 16 bytes. Identifica el trace completo (mismo en todos los
+///     spans del árbol). Sentinel "no trace" = `[0u8; 16]` (TraceId::INVALID).
+///   - `parent_span_id`: 8 bytes. Identifica el span padre dentro de ese trace.
+///     CELER lo usa para reconstruir un `SpanContext` y abrir su span como
+///     hijo del span de AEGIS. Sentinel "no parent" = `[0u8; 8]` (SpanId::INVALID).
 #[repr(C, align(64))]
 #[derive(Debug, Clone, Copy)]
 pub struct StrokeEvent {
@@ -34,6 +38,7 @@ pub struct StrokeEvent {
     pub pressure: f32,
     pub action: u8,
     pub trace_id: [u8; 16],
+    pub parent_span_id: [u8; 8],
 }
 
 /// Acolchado de línea de caché para prevenir false sharing entre `head` y `tail`.
@@ -160,6 +165,7 @@ mod tests {
         assert_eq!(offset_of!(StrokeEvent, pressure), 24);
         assert_eq!(offset_of!(StrokeEvent, action), 28);
         assert_eq!(offset_of!(StrokeEvent, trace_id), 29);
+        assert_eq!(offset_of!(StrokeEvent, parent_span_id), 45);
     }
 
     #[test]
@@ -181,6 +187,7 @@ mod tests {
         let mut consumer = unsafe { CelerConsumer::new(ptr) };
 
         let trace = [0xab; 16];
+        let span = [0xcd; 8];
         let evt = StrokeEvent {
             session_id: 42,
             timestamp: 1_700_000_000_000_000_000,
@@ -189,6 +196,7 @@ mod tests {
             pressure: 0.7,
             action: 1,
             trace_id: trace,
+            parent_span_id: span,
         };
         producer.push(evt).expect("push should succeed");
 
@@ -199,6 +207,7 @@ mod tests {
         assert_eq!(read.pressure, 0.7);
         assert_eq!(read.action, 1);
         assert_eq!(read.trace_id, trace, "trace_id debe sobrevivir el roundtrip byte a byte");
+        assert_eq!(read.parent_span_id, span, "parent_span_id debe sobrevivir el roundtrip byte a byte");
 
         assert!(consumer.pop().is_none(), "ring debería estar vacío");
 
