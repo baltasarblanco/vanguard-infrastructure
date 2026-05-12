@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 mod lexer;
-mod ast; // <-- Agregá esta línea
-mod ring_buffer;
+mod ast;
+
+use shared_ipc::{CelerConsumer, SharedRing};
+
 
 use nix::cmsg_space;
 use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
@@ -51,7 +53,7 @@ struct PrecisionEvent {
 
 #[tokio::main]
 async fn main() {
-    println!("📏 TAMAÑO DE EVENTO: {} bytes", std::mem::size_of::<ring_buffer::StrokeEvent>());
+    println!("📏 TAMAÑO DE EVENTO: {} bytes", std::mem::size_of::<shared_ipc::StrokeEvent>());
     
     // 1. Canal de Telemetría (Broadcast para múltiples pestañas de Chrome/Firefox)
     let (tx, _) = broadcast::channel::<PrecisionEvent>(2048);
@@ -108,8 +110,8 @@ async fn main() {
 
         let file = unsafe { File::from_raw_fd(received_fd) };
         let mmap = unsafe { MmapMut::map_mut(&file).unwrap() };
-        let ring_ptr = mmap.as_ptr() as *mut ring_buffer::SharedRing;
-        let mut consumer = unsafe { ring_buffer::CelerConsumer::new(ring_ptr) };
+        let ring_ptr = mmap.as_ptr() as *mut SharedRing;
+        let mut consumer = unsafe { CelerConsumer::new(ring_ptr) };
 
         let mut fsm_pool: Vec<SessionState> = vec![
             SessionState { 
@@ -137,21 +139,27 @@ async fn main() {
                 let state = &mut fsm_pool[(event.session_id as usize) & SESSION_MASK];
 
                 match event.action {
+                    ACTION_DOWN => {
+                        // Inicio de trazo: arma la FSM para esta sesión.
+                        state.active = true;
+                        state.last_x = event.x;
+                        state.last_y = event.y;
+                        state.last_timestamp = event.timestamp;
+                        state.smoothed_precision = 100.0;
+                    }
                     ACTION_MOVE => {
                         if state.active {
                             let dx = event.x - state.last_x;
                             let dy = event.y - state.last_y;
                             let dist = dx.hypot(dy);
 
-                            // 🚨 BYPASS: Dejamos pasar CUALQUIER movimiento mayor a 0 píxeles
-                            if dist > 0.0 { 
-                                // Hacemos un cálculo de precisión falso/aleatorio solo para probar la UI
-                                let mut instant_precision = if dist > 5.0 { 95.0 } else { 45.0 };
-                                
-                                let alpha = 0.15;
-                                state.smoothed_precision = (instant_precision * alpha) + (state.smoothed_precision * (1.0 - alpha));
+                            if dist > 0.0 {
+                                let instant_precision = if dist > 5.0 { 95.0 } else { 45.0 };
 
-                                // 🚨 BYPASS: Forzamos el envío ignorando el límite de 15ms
+                                let alpha = 0.15;
+                                state.smoothed_precision =
+                                    (instant_precision * alpha) + (state.smoothed_precision * (1.0 - alpha));
+
                                 println!("📡 [CELER] Mandando al anillo: {:.1}%", state.smoothed_precision);
 
                                 let _ = tx_for_core.send(PrecisionEvent {
@@ -161,7 +169,7 @@ async fn main() {
                                     speed: dist,
                                 });
 
-                                state.last_x = event.x; 
+                                state.last_x = event.x;
                                 state.last_y = event.y;
                             }
                         }

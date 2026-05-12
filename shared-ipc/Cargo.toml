@@ -1,0 +1,11 @@
+[package]
+name = "shared-ipc"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "Zero-copy SPSC ring buffer over shared memory for AEGIS↔CELER IPC."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Pura std. NO agregar dependencias acá sin discusión: cualquier dep en shared-ipc
+# se propaga a AEGIS y CELER, que son los que tienen que mantenerse magros.
