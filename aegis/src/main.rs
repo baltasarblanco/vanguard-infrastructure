@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+mod otel;
 use shared_ipc::{AegisProducer, SharedRing, StrokeEvent};
 
 use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
@@ -64,6 +65,7 @@ static SESSION_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    let otel_provider = otel::init_tracing("aegis");
     println!("📏 TAMAÑO DE EVENTO: {} bytes", std::mem::size_of::<StrokeEvent>());
     println!("⚙️ [AEGIS CONTROL PLANE] Iniciando secuencia de arranque...");
 
@@ -405,5 +407,6 @@ async fn main() {
     for handle in handles {
         handle.join().unwrap();
     }
+    let _ = otel_provider.shutdown();
     println!("💀 [AEGIS CONTROL PLANE] Apagado completo. Exit Code 0.");
 }

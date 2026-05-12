@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+mod otel;
 
 use shared_ipc::{CelerConsumer, SharedRing};
 
@@ -51,6 +52,7 @@ struct PrecisionEvent {
 
 #[tokio::main]
 async fn main() {
+    let _otel_provider = otel::init_tracing("celer");
     println!("📏 TAMAÑO DE EVENTO: {} bytes", std::mem::size_of::<shared_ipc::StrokeEvent>());
     
     // 1. Canal de Telemetría (Broadcast para múltiples pestañas de Chrome/Firefox)
