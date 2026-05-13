@@ -126,17 +126,8 @@ async fn main() {
             }; 
             SESSION_POOL_SIZE
         ];
-    
-        // 🔍 CONTADOR DE DEBUG INYECTADO
-        let mut pop_attempts = 0u64; 
 
         loop {
-            // Latido del motor (Silenciado para no romper el HUD)
-            pop_attempts = pop_attempts.wrapping_add(1);
-            // if pop_attempts % 10_000_000 == 0 {
-            //     println!("🔍 [CELER DEBUG] Motor girando... ({} M ciclos sin datos)", pop_attempts / 1_000_000);
-            // }
-
             if let Some(event) = consumer.pop() {
                 EVENTS_PROCESSED.fetch_add(1, Ordering::Relaxed);
 
