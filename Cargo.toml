@@ -6,10 +6,8 @@ members = [
     "aegis-mock",
     "celer",
     "chronos",
-    "prototypes/ryuu_backend",
     "shared-ipc",                  # ← agregado
 ]
-
 [workspace.dependencies]
 tokio = { version = "1.30", features = ["full"] }
 tokio-uring = "0.5.0"
@@ -21,7 +19,6 @@ futures-util = { version = "0.3", features = ["sink"] }
 memmap2 = "0.9"
 core_affinity = "0.8"
 socket2 = "0.6.3"
-
 # Observability stack — agregada para task 1.6 (OTel trace propagation).
 # Frontend: tracing + tracing-subscriber (instrumentación + filtros).
 # Bridge:   tracing-opentelemetry (mapea spans de `tracing` al modelo OTel).
