@@ -14,6 +14,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub const RING_CAPACITY: usize = 131_072;
 const INDEX_MASK: usize = RING_CAPACITY - 1;
 
+/// Action tag for [`StrokeEvent::action`]. Encodes the lifecycle of a single
+/// stroke: pen down (start of a new stroke), move (continuation), up (end).
+///
+/// These constants are the **single source of truth** for the action protocol
+/// across the entire pipeline: the browser frontend, AEGIS (producer), and
+/// CELER (consumer) all use these exact values. The frontend mirrors them as
+/// JavaScript `const`s in `celer/src/index.html` - keep both in sync.
+///
+/// Values are intentionally small (`u8`) and dense (0/1/2) so the producer
+/// can validate range without a lookup table.
+pub const ACTION_DOWN: u8 = 0;
+pub const ACTION_MOVE: u8 = 1;
+pub const ACTION_UP:   u8 = 2;
+
 /// Evento escrito por AEGIS y leído por CELER.
 ///
 /// Alineado a 64 bytes (una línea de caché L1). El compilador agrega padding
@@ -212,5 +226,16 @@ mod tests {
         assert!(consumer.pop().is_none(), "ring debería estar vacío");
 
         unsafe { dealloc(ptr as *mut u8, layout) };
+    }
+
+    /// Pin the canonical action protocol. ACTION_DOWN/MOVE/UP must form
+    /// a dense contiguous lifecycle 0..3. The frontend, aegis, and celer
+    /// all rely on these exact values. Any drift breaks tests here before
+    /// it breaks the user-visible system.
+    #[test]
+    fn action_constants_form_dense_lifecycle() {
+        assert_eq!(ACTION_DOWN, 0);
+        assert_eq!(ACTION_MOVE, 1);
+        assert_eq!(ACTION_UP, 2);
     }
 }

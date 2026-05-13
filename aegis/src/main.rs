@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 mod otel;
-use shared_ipc::{AegisProducer, SharedRing, StrokeEvent};
+use shared_ipc::{AegisProducer, SharedRing, StrokeEvent, ACTION_DOWN, ACTION_MOVE, ACTION_UP};
 
 use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
 use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
@@ -180,11 +180,13 @@ async fn main() {
                             let flag_index = bin_data.len() - 1;
                             let flag = bin_data[flag_index];
 
-                            // 2. Mapeo Táctico de Acciones (Normalización para CELER)
+                            // 2. Validación de rango. El frontend usa el mismo convenio
+                            //    canónico que el resto del sistema (ACTION_DOWN=0,
+                            //    ACTION_MOVE=1, ACTION_UP=2 — definidos en shared_ipc).
+                            //    No remapeamos: si el byte llega fuera de rango, es bug
+                            //    del cliente y descartamos el evento.
                             let action = match flag {
-                                1 => 0, // start -> ACTION_DOWN
-                                0 => 1, // move  -> ACTION_MOVE
-                                2 => 2, // end   -> ACTION_UP
+                                ACTION_DOWN | ACTION_MOVE | ACTION_UP => flag,
                                 _ => {
                                     tracing::warn!(flag, "AEGIS: flag de WebSocket desconocido");
                                     return;

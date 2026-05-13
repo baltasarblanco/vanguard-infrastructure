@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 mod otel;
 
-use shared_ipc::{CelerConsumer, SharedRing};
+use shared_ipc::{CelerConsumer, SharedRing, ACTION_DOWN, ACTION_MOVE, ACTION_UP};
 
 
 use nix::cmsg_space;
@@ -30,11 +30,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 const CELER_PORT: u16 = 9030;
 const SESSION_POOL_SIZE: usize = 65536;
 const SESSION_MASK: usize = SESSION_POOL_SIZE - 1;
-const SPEED_THRESHOLD: f32 = 8.5;       
-
-const ACTION_DOWN: u8 = 0;
-const ACTION_MOVE: u8 = 1;
-const ACTION_UP: u8 = 2;
+const SPEED_THRESHOLD: f32 = 8.5;
 
 static EVENTS_PROCESSED: AtomicU64 = AtomicU64::new(0);
 
