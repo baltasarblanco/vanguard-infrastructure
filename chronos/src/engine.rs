@@ -24,7 +24,7 @@ impl Engine {
             .open(&path)?;
 
         let mut map = HashMap::new();
-        println!("   📜 Rehidratando memoria desde '{}'...", path);
+        tracing::info!(path = %path, "chronos: rehydrating from log");
         let reader = BufReader::new(file.try_clone()?);
 
         for line in reader.lines() {
@@ -34,7 +34,7 @@ impl Engine {
                 }
             }
         }
-        println!("   ✅ Memoria restaurada: {} registros.", map.len());
+        tracing::info!(records = map.len(), "chronos: rehydration complete");
         Ok(Engine {
             map,
             log_file: file,
@@ -53,7 +53,7 @@ impl Engine {
 
     pub fn compact(&mut self) -> io::Result<()> {
         let temp_path = "chronos_temp.db";
-        println!("   🧹 Iniciando Compactación (Garbage Colecction)...");
+        tracing::info!("chronos: compaction started");
 
         let mut temp_file = OpenOptions::new()
             .create(true)
@@ -72,7 +72,7 @@ impl Engine {
             .read(true)
             .append(true)
             .open(DB_PATH)?;
-        println!("   ✨ Compactación terminada. Basura eliminada.");
+        tracing::info!("chronos: compaction complete");
         Ok(())
     }
 }

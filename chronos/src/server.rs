@@ -20,9 +20,9 @@ use crate::parser::{self, Command}; // <---- IMPORTAMOS NUESTRO PARSER
 pub type Db = Arc<RwLock<Engine>>;
 
 pub fn start_server(db: Db) {
-    let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
-    println!("🚀 CHRONOS SERVER LISTO Y ESCUCHANDO EN TCP 127.0.0.1:8080");
-    println!("   Esperando conexiones entrantes...\n");
+    let addr = "127.0.0.1:8080";
+    let listener = TcpListener::bind(addr).unwrap();
+    tracing::info!(addr, "chronos: tcp server listening");
 
     for stream in listener.incoming() {
         match stream {
@@ -30,13 +30,13 @@ pub fn start_server(db: Db) {
                 let db_clone = Arc::clone(&db);
                 // Obtenemos la IP del cliente para nuestros logs
                 let peer_addr = stream.peer_addr().unwrap();
-                println!("   🟢 NUEVA CONEXIÓN: {}", peer_addr);
+                tracing::info!(peer = %peer_addr, "chronos: new connection");
 
                 thread::spawn(move || {
                     handle_client(stream, db_clone, peer_addr.to_string());
                 });
             }
-            Err(e) => println!("   ❌ Error de conexión entrante: {}", e),
+            Err(e) => tracing::warn!(error = %e, "chronos: incoming connection error"),
         }
     }
 }
@@ -49,7 +49,7 @@ fn handle_client(mut stream: TcpStream, db: Db, peer_addr: String) {
             Ok(bytes_read) => {
                 // Si leemos 0 bytes, significa que el cliente cerró la conexión (EOF)
                 if bytes_read == 0 {
-                    println!("   🔴 DESCONECTADO (Limpio): {}", peer_addr);
+                    tracing::info!(peer = %peer_addr, "chronos: client disconnected cleanly");
                     break;
                 }
 
@@ -95,13 +95,13 @@ fn handle_client(mut stream: TcpStream, db: Db, peer_addr: String) {
                 };
 
                 if stream.write_all(response.as_bytes()).is_err() {
-                    println!("   ⚠️ Error al enviar respuesta {}", peer_addr);
+                    tracing::warn!(peer = %peer_addr, "chronos: failed to send response");
                     break;
                 }
             }
             Err(e) => {
                 // Caso 2: Desconexión violenta (Ctrl+C, corte de internet, etc...)
-                println!("   🔴 DESCONECTADO (Forzado): {} -> {}", peer_addr, e);
+                tracing::warn!(peer = %peer_addr, error = %e, "chronos: client disconnected forcefully");
                 break;
             }
         }
