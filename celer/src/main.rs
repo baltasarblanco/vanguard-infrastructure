@@ -45,14 +45,12 @@ struct SessionState {
     last_dx: f32, last_dy: f32,
     last_timestamp: u64,
     smoothed_precision: f32, // <--- Nueva: Inercia de precisión
-    last_feedback_time: u64, // <--- Nueva: Para no saturar la web
 }
 // Campos sincronizados con el Frontend RYŪ v2.2
 #[derive(Clone, Serialize)]
 struct PrecisionEvent {
     session_id: u32,
     precision: f32,      
-    feedback: String,    
     speed: f32,
 }
 
@@ -122,7 +120,7 @@ async fn main() {
         let mut fsm_pool: Vec<SessionState> = vec![
             SessionState { 
                 active: false, last_x: 0.0, last_y: 0.0, last_dx: 0.0, last_dy: 0.0, 
-                last_timestamp: 0, smoothed_precision: 100.0, last_feedback_time: 0      
+                last_timestamp: 0, smoothed_precision: 100.0,
             }; 
             SESSION_POOL_SIZE
         ];
@@ -190,7 +188,6 @@ async fn main() {
                                 let _ = tx_for_core.send(PrecisionEvent {
                                     session_id: event.session_id,
                                     precision: state.smoothed_precision,
-                                    feedback: "🟢 Bypass Activado".to_string(),
                                     speed: dist,
                                 });
 

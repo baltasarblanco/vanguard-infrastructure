@@ -365,10 +365,6 @@
                     precisionText.style.color = color;
                     if (gauge) gauge.style.stroke = color;
                 }
-
-                if (data.feedback && data.feedback !== "Trazo Estable") {
-                    log.innerHTML = `<div><span style="color:#666;">[${new Date().toLocaleTimeString()}]</span> ${data.feedback}</div>` + log.innerHTML;
-                }
             } catch (err) {
                 // 🚨 SI ALGO EXPLOTA, NOS AVISA POR CONSOLA
                 console.error("🔥 Error crítico procesando datos de Celer:", err);
