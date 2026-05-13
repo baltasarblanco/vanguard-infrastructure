@@ -15,7 +15,6 @@ A persistent, concurrent-ready key-value store built from scratch in Rust. Imple
 - **LSM-tree storage**: in-memory `MemTable` (HashMap) + disk-backed sorted SSTables.
 - **Write-Ahead Log (WAL)**: ensures durability; replays on startup to recover state.
 - **Compaction**: merges and prunes tombstoned entries in memory.
-- **Bloom filters**: (si realmente los tiene, añadilo) used to reduce disk lookups.
 - **Concurrency model**: `Arc<RwLock<T>>` allows multiple concurrent readers; writers take exclusive lock.
 - **TCP server**: accepts concurrent connections, dispatches to parser + engine.
 
