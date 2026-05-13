@@ -65,6 +65,56 @@ impl Drop for ConnectionGuard {
 // Generador de IDs de sesión para el Dojo
 static SESSION_COUNTER: AtomicU32 = AtomicU32::new(1);
 
+/// Campos de un StrokeEvent que dependen exclusivamente del payload binario
+/// recibido por WebSocket. Lo que requiere runtime state (session_id,
+/// timestamp, trace_id, parent_span_id) se construye fuera del parsing.
+#[derive(Debug, PartialEq)]
+struct ParsedStroke {
+    x: f32,
+    y: f32,
+    pressure: f32,
+    action: u8,
+}
+
+/// Resultado de parsear un payload binario. WrongLength e InvalidFlag son
+/// variantes distintas porque el caller las trata distinto: WrongLength es
+/// silencioso (siguiente mensaje), InvalidFlag log + cierre de sesión.
+#[derive(Debug, PartialEq)]
+enum ParseOutcome {
+    Valid(ParsedStroke),
+    WrongLength,
+    InvalidFlag(u8),
+}
+
+/// Parsea un payload binario WebSocket al formato canónico del Dojo.
+/// Acepta 13 bytes (formato estándar) o 17 bytes (con presión opcional en
+/// bytes 8..12). El flag de acción es el último byte y debe ser uno de
+/// ACTION_DOWN/MOVE/UP definidos en shared_ipc.
+fn parse_stroke_payload(bin_data: &[u8]) -> ParseOutcome {
+    if bin_data.len() != 13 && bin_data.len() != 17 {
+        return ParseOutcome::WrongLength;
+    }
+
+    let x = f32::from_le_bytes(bin_data[0..4].try_into().unwrap_or([0; 4]));
+    let y = f32::from_le_bytes(bin_data[4..8].try_into().unwrap_or([0; 4]));
+
+    let pressure = if bin_data.len() == 17 {
+        f32::from_le_bytes(bin_data[8..12].try_into().unwrap_or([0; 4]))
+    } else {
+        1.0
+    };
+
+    let flag_index = bin_data.len() - 1;
+    let flag = bin_data[flag_index];
+
+    let action = match flag {
+        ACTION_DOWN | ACTION_MOVE | ACTION_UP => flag,
+        _ => return ParseOutcome::InvalidFlag(flag),
+    };
+
+    ParseOutcome::Valid(ParsedStroke { x, y, pressure, action })
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let otel_provider = otel::init_tracing("aegis");
@@ -153,7 +203,15 @@ async fn main() {
                 while let Some(msg) = ws_receiver.next().await {
                     match msg {
                         Ok(Message::Binary(bin_data)) => {
-                        if bin_data.len() == 13 || bin_data.len() == 17 {
+                            let parsed = match parse_stroke_payload(&bin_data) {
+                                ParseOutcome::Valid(p) => p,
+                                ParseOutcome::WrongLength => continue,
+                                ParseOutcome::InvalidFlag(flag) => {
+                                    tracing::warn!(flag, "aegis: unknown websocket flag");
+                                    return;
+                                }
+                            };
+
                             // Span por mensaje. Capturamos trace_id Y span_id del
                             // contexto; ambos viajan con el StrokeEvent hasta CELER,
                             // donde se reconstruye un SpanContext "remoto" para que
@@ -165,67 +223,38 @@ async fn main() {
                             );
                             let _enter = span.enter();
 
-                            // 1. Extracción segura de coordenadas (Zero-copy style)
-                            let x = f32::from_le_bytes(bin_data[0..4].try_into().unwrap_or([0; 4]));
-                            let y = f32::from_le_bytes(bin_data[4..8].try_into().unwrap_or([0; 4]));
-
-                            // Si vienen 17 bytes, el 3er float es presión. Si no, 1.0 por defecto.
-                            let pressure = if bin_data.len() == 17 {
-                                f32::from_le_bytes(bin_data[8..12].try_into().unwrap_or([0; 4]))
-                            } else {
-                                1.0
-                            };
-
-                            // El flag siempre es el byte 12 (en 13 bytes) o el byte 16 (en 17 bytes)
-                            let flag_index = bin_data.len() - 1;
-                            let flag = bin_data[flag_index];
-
-                            // 2. Validación de rango. El frontend usa el mismo convenio
-                            //    canónico que el resto del sistema (ACTION_DOWN=0,
-                            //    ACTION_MOVE=1, ACTION_UP=2 — definidos en shared_ipc).
-                            //    No remapeamos: si el byte llega fuera de rango, es bug
-                            //    del cliente y descartamos el evento.
-                            let action = match flag {
-                                ACTION_DOWN | ACTION_MOVE | ACTION_UP => flag,
-                                _ => {
-                                    tracing::warn!(flag, "aegis: unknown websocket flag");
-                                    return;
-                                }
-                            };
-
-                            // 3. Generación de Timestamp de alta resolución (Nanosegundos)
+                            // Timestamp de alta resolución (Nanosegundos)
                             let timestamp = SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_nanos() as u64;
 
-                            // 4. Captura del SpanContext completo: trace_id (mismo
-                            //    en todos los spans del árbol) + span_id (identifica
-                            //    este span concreto, que pasará a ser parent_span_id
-                            //    en CELER).
+                            // Captura del SpanContext completo: trace_id (mismo
+                            // en todos los spans del árbol) + span_id (identifica
+                            // este span concreto, que pasará a ser parent_span_id
+                            // en CELER).
                             let parent_context = span.context();
                             let span_ref = parent_context.span();
                             let sc = span_ref.span_context();
                             let trace_id = sc.trace_id().to_bytes();
                             let parent_span_id = sc.span_id().to_bytes();
 
-                            // 5. Construcción del Evento Cinético
+                            // Construcción del Evento Cinético
                             let event = StrokeEvent {
                                 session_id: session_id as u32,
                                 timestamp,
-                                x,
-                                y,
-                                pressure,
-                                action,
+                                x: parsed.x,
+                                y: parsed.y,
+                                pressure: parsed.pressure,
+                                action: parsed.action,
                                 trace_id,
                                 parent_span_id,
                             };
 
-                            // 6. Inyección al Ring Buffer (Memoria Compartida)
+                            // Inyección al Ring Buffer (Memoria Compartida)
                             if producer_clone.push(event).is_err() {
                                 tracing::warn!("aegis: ring buffer saturated, celer not draining");
                             }
-                        }
                         }
                         Ok(Message::Close(_)) => {
                             tracing::info!(session_id, "aegis: websocket session disconnected");
