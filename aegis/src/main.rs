@@ -37,6 +37,11 @@ const BUFFER_SIZE: usize = 4096;
 const POOL_CAPACITY: usize = 1024;
 const MAX_HOT_PIPES: usize = 64;
 
+// Contrato del payload binario WebSocket: x (4 bytes LE) + y (4 bytes LE)
+// + padding (4 bytes reservados, no parseados) + action flag (1 byte).
+// Total: 13 bytes exactos. Cualquier otra longitud se rechaza.
+const STROKE_PAYLOAD_LEN: usize = 13;
+
 // 💥 RICHARDS VECTOR: Acolchado de Caché
 #[repr(align(64))]
 struct CachePadded<T>(T);
@@ -87,25 +92,18 @@ enum ParseOutcome {
 }
 
 /// Parsea un payload binario WebSocket al formato canónico del Dojo.
-/// Acepta 13 bytes (formato estándar) o 17 bytes (con presión opcional en
-/// bytes 8..12). El flag de acción es el último byte y debe ser uno de
-/// ACTION_DOWN/MOVE/UP definidos en shared_ipc.
+/// Acepta exactamente STROKE_PAYLOAD_LEN (13) bytes. La presión no viaja
+/// en el payload — el servidor asume 1.0 hasta que el frontend incorpore
+/// dispositivos con sensor de presión y se reabra el contrato.
 fn parse_stroke_payload(bin_data: &[u8]) -> ParseOutcome {
-    if bin_data.len() != 13 && bin_data.len() != 17 {
+    if bin_data.len() != STROKE_PAYLOAD_LEN {
         return ParseOutcome::WrongLength;
     }
 
     let x = f32::from_le_bytes(bin_data[0..4].try_into().unwrap_or([0; 4]));
     let y = f32::from_le_bytes(bin_data[4..8].try_into().unwrap_or([0; 4]));
-
-    let pressure = if bin_data.len() == 17 {
-        f32::from_le_bytes(bin_data[8..12].try_into().unwrap_or([0; 4]))
-    } else {
-        1.0
-    };
-
-    let flag_index = bin_data.len() - 1;
-    let flag = bin_data[flag_index];
+    let pressure = 1.0;
+    let flag = bin_data[12];
 
     let action = match flag {
         ACTION_DOWN | ACTION_MOVE | ACTION_UP => flag,
@@ -457,4 +455,82 @@ async fn main() {
     }
     let _ = otel_provider.shutdown();
     tracing::info!("aegis: shutdown complete");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_valid_payload(action: u8) -> Vec<u8> {
+        let mut buf = vec![0u8; STROKE_PAYLOAD_LEN];
+        buf[0..4].copy_from_slice(&1.5f32.to_le_bytes());
+        buf[4..8].copy_from_slice(&2.5f32.to_le_bytes());
+        // bytes 8..12: padding reservado, sin contenido específico
+        buf[12] = action;
+        buf
+    }
+
+    #[test]
+    fn rejects_empty_payload() {
+        assert_eq!(parse_stroke_payload(&[]), ParseOutcome::WrongLength);
+    }
+
+    #[test]
+    fn rejects_payload_too_short() {
+        assert_eq!(parse_stroke_payload(&[0u8; 12]), ParseOutcome::WrongLength);
+    }
+
+    #[test]
+    fn rejects_payload_just_over() {
+        assert_eq!(parse_stroke_payload(&[0u8; 14]), ParseOutcome::WrongLength);
+    }
+
+    #[test]
+    fn rejects_legacy_17_byte_payload() {
+        // El formato viejo de 17 bytes (con campo presión opcional en bytes
+        // 8..12) está explícitamente fuera del contrato actual. Este test
+        // sella la decisión para que nadie reintroduzca la rama "por las
+        // dudas" sin actualizar el contrato y este test al mismo tiempo.
+        let mut buf = vec![0u8; 17];
+        buf[16] = ACTION_DOWN;
+        assert_eq!(parse_stroke_payload(&buf), ParseOutcome::WrongLength);
+    }
+
+    #[test]
+    fn rejects_invalid_action_flag() {
+        let buf = build_valid_payload(99);
+        assert_eq!(parse_stroke_payload(&buf), ParseOutcome::InvalidFlag(99));
+    }
+
+    #[test]
+    fn accepts_valid_down_payload() {
+        let buf = build_valid_payload(ACTION_DOWN);
+        assert_eq!(
+            parse_stroke_payload(&buf),
+            ParseOutcome::Valid(ParsedStroke {
+                x: 1.5,
+                y: 2.5,
+                pressure: 1.0,
+                action: ACTION_DOWN,
+            })
+        );
+    }
+
+    #[test]
+    fn accepts_move_action() {
+        let buf = build_valid_payload(ACTION_MOVE);
+        assert!(matches!(
+            parse_stroke_payload(&buf),
+            ParseOutcome::Valid(p) if p.action == ACTION_MOVE
+        ));
+    }
+
+    #[test]
+    fn accepts_up_action() {
+        let buf = build_valid_payload(ACTION_UP);
+        assert!(matches!(
+            parse_stroke_payload(&buf),
+            ParseOutcome::Valid(p) if p.action == ACTION_UP
+        ));
+    }
 }
