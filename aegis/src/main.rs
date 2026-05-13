@@ -68,13 +68,13 @@ static SESSION_COUNTER: AtomicU32 = AtomicU32::new(1);
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let otel_provider = otel::init_tracing("aegis");
-    println!("📏 TAMAÑO DE EVENTO: {} bytes", std::mem::size_of::<StrokeEvent>());
-    println!("⚙️ [AEGIS CONTROL PLANE] Iniciando secuencia de arranque...");
+    tracing::info!(event_bytes = std::mem::size_of::<StrokeEvent>(), "aegis: stroke event size");
+    tracing::info!("aegis: starting up");
 
     // =======================================================================
     // 🌉 PUENTE FANTASMA IPC & RING BUFFER (AEGIS -> CELER)
     // =======================================================================
-    println!("🌉 [AEGIS IPC] Forjando memoria compartida (memfd)...");
+    tracing::info!("aegis: creating shared memory (memfd)");
 
     let celer_name = CString::new("celer_bridge").unwrap();
     let fd = memfd_create(celer_name.as_c_str(), MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING)
@@ -95,7 +95,7 @@ async fn main() {
 
     // HILO 1: El Centinela (Pasa el File Descriptor a CELER)
     thread::spawn(move || {
-        println!("⏳ [AEGIS IPC] Hilo centinela buscando a CELER en /tmp/celer_bridge.sock...");
+        tracing::info!(socket = "/tmp/celer_bridge.sock", "aegis: awaiting celer handshake");
         let mut intentos = 0;
         let stream = loop {
             match UnixStream::connect("/tmp/celer_bridge.sock") {
@@ -103,7 +103,7 @@ async fn main() {
                 Err(_) => {
                     intentos += 1;
                     if intentos % 5 == 0 {
-                        println!("⚠️ [AEGIS IPC] CELER no responde. Reintentando conexión...");
+                        tracing::warn!(intentos, "aegis: celer not responding, retrying handshake");
                     }
                     std::thread::sleep(Duration::from_secs(2));
                 }
@@ -114,8 +114,8 @@ async fn main() {
         let cmsgs = [ControlMessage::ScmRights(&[raw_fd])];
 
         match sendmsg::<()>(stream.as_raw_fd(), &iov, &cmsgs, MsgFlags::empty(), None) {
-            Ok(_) => println!("✅ [AEGIS IPC] ¡Conexión establecida! File Descriptor transferido a CELER."),
-            Err(e) => eprintln!("❌ [AEGIS IPC] Fallo crítico al inyectar el FD: {}", e),
+            Ok(_) => tracing::info!("aegis: handshake complete, FD transferred to celer"),
+            Err(e) => tracing::error!(error = %e, "aegis: critical FD injection failure"),
         }
     });
 
@@ -131,7 +131,7 @@ async fn main() {
         // 🔥 ACÁ ESTÁ EL CAMBIO: Puerto 9090 para no chocar
         let ws_addr = "0.0.0.0:9090";
         let listener = tokio::net::TcpListener::bind(&ws_addr).await.expect("Error WS bind");
-        println!("⛩️ [AEGIS RYŪ] Dojo WebSocket Server escuchando en ws://{}", ws_addr);
+        tracing::info!(addr = %ws_addr, "aegis: websocket server listening");
 
         while let Ok((stream, _)) = listener.accept().await {
             let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -142,12 +142,12 @@ async fn main() {
                 let ws_stream = match accept_async(stream).await {
                     Ok(ws) => ws,
                     Err(e) => {
-                        eprintln!("Error en el handshake WebSocket (Conexión ignorada): {}", e);
+                        tracing::warn!(error = %e, "aegis: websocket handshake failed");
                         return;
                     }
                 };
 
-                println!("⚡ [AEGIS RYŪ] Nuevo discípulo conectado. Session ID: {}", session_id);
+                tracing::info!(session_id, "aegis: new websocket session");
                 let (_, mut ws_receiver) = ws_stream.split();
 
                 while let Some(msg) = ws_receiver.next().await {
@@ -188,7 +188,7 @@ async fn main() {
                             let action = match flag {
                                 ACTION_DOWN | ACTION_MOVE | ACTION_UP => flag,
                                 _ => {
-                                    tracing::warn!(flag, "AEGIS: flag de WebSocket desconocido");
+                                    tracing::warn!(flag, "aegis: unknown websocket flag");
                                     return;
                                 }
                             };
@@ -223,12 +223,12 @@ async fn main() {
 
                             // 6. Inyección al Ring Buffer (Memoria Compartida)
                             if producer_clone.push(event).is_err() {
-                                tracing::warn!("AEGIS: Ring Buffer SATURADO, CELER no procesa");
+                                tracing::warn!("aegis: ring buffer saturated, celer not draining");
                             }
                         }
                         }
                         Ok(Message::Close(_)) => {
-                            println!("🛑 [AEGIS RYŪ] Discípulo {} desconectado.", session_id);
+                            tracing::info!(session_id, "aegis: websocket session disconnected");
                             break;
                         }
                         _ => {}
@@ -277,7 +277,7 @@ async fn main() {
 
             tokio_uring::start(async move {
                 let listener = TcpListener::from_std(std_listener);
-                println!("🚀 [AEGIS-CORE-{}] Motor y Tuberías encendidas.", core_id.id);
+                tracing::info!(core_id = core_id.id, "aegis: core thread ready");
 
                 loop {
                     tokio::select! {
@@ -358,14 +358,14 @@ async fn main() {
         handles.push(handle);
     }
 
-    println!("🛡️ [AEGIS CONTROL PLANE] Todos los sistemas nominales. HUD en terminal Activado.");
+    tracing::info!("aegis: all subsystems nominal");
 
     let tele_metrics = telemetry.clone();
     tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind("0.0.0.0:8082").await {
             Ok(l) => l,
             Err(_) => {
-                println!("⚠️ [TELEMETRÍA] Puerto 8082 ocupado. Modo CLON activado (operando sin satélite).");
+                tracing::warn!(port = 8082, "aegis: telemetry port unavailable, prometheus endpoint disabled");
                 return;
             }
         };
@@ -407,7 +407,7 @@ async fn main() {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                println!("\n⚠️ [AEGIS CONTROL PLANE] Ctrl+C detectado. Iniciando apagado de la Hidra...");
+                tracing::info!("aegis: ctrl-c received, shutting down");
                 break;
             }
             _ = ticker.tick() => {
@@ -416,7 +416,7 @@ async fn main() {
                 let mb = bytes as f64 / 1_048_576.0;
 
                 if conns > 0 || bytes > 0 {
-                    println!("📊 [HUD] Conexiones: {} | Tráfico: {:.4} MB", conns, mb);
+                    tracing::info!(connections = conns, traffic_mb = mb, "aegis: hud tick");
                 }
             }
         }
@@ -427,5 +427,5 @@ async fn main() {
         handle.join().unwrap();
     }
     let _ = otel_provider.shutdown();
-    println!("💀 [AEGIS CONTROL PLANE] Apagado completo. Exit Code 0.");
+    tracing::info!("aegis: shutdown complete");
 }
