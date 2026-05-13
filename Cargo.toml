@@ -1,16 +1,13 @@
 [workspace]
 resolver = "2"
-
 # Aquí declaramos todas las carpetas que contienen un Cargo.toml
 members = [
     "aegis",
     "aegis-mock",
     "celer",
     "chronos",
-    "prototypes/ryuu_backend",
     "shared-ipc",                  # ← agregado
 ]
-
 [workspace.dependencies]
 tokio = { version = "1.30", features = ["full"] }
 tokio-uring = "0.5.0"
@@ -22,3 +19,17 @@ futures-util = { version = "0.3", features = ["sink"] }
 memmap2 = "0.9"
 core_affinity = "0.8"
 socket2 = "0.6.3"
+# Observability stack — agregada para task 1.6 (OTel trace propagation).
+# Frontend: tracing + tracing-subscriber (instrumentación + filtros).
+# Bridge:   tracing-opentelemetry (mapea spans de `tracing` al modelo OTel).
+# Backend:  opentelemetry + opentelemetry_sdk + opentelemetry-otlp (export gRPC a Jaeger:4317).
+# Versiones pinneadas: 0.28 (opentelemetry stack) + 0.29 (tracing-opentelemetry).
+# La regla de compat post-0.26 es N+1: tracing-opentelemetry X.Y ↔ opentelemetry (X-1).Y.
+# opentelemetry-otlp 0.28 cambió defaults: grpc-tonic ya no es default, debe habilitarse
+# explícitamente con default-features = false para evitar arrastrar reqwest+hyper-tls.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-opentelemetry = "0.29"
+opentelemetry = { version = "0.28", features = ["trace"] }
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic", "trace"], default-features = false }

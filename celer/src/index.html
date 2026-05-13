@@ -209,6 +209,12 @@
 </main>
 
 <script>
+    // Action constants must mirror shared_ipc::ACTION_* in the Rust workspace.
+    // Single source of truth lives at shared-ipc/src/lib.rs — keep in sync.
+    const ACTION_DOWN = 0;
+    const ACTION_MOVE = 1;
+    const ACTION_UP   = 2;
+
     const WS_AEGIS_URL = "ws://127.0.0.1:9090"; 
     const WS_CELER_URL = "ws://127.0.0.1:3031/ws";
 
@@ -272,7 +278,7 @@
         drawing = true;
         const pos = getCoords(e);
         ctx.beginPath(); ctx.moveTo(pos.x, pos.y);
-        sendPoint(pos.x, pos.y, 1); // ACTION_DOWN
+        sendPoint(pos.x, pos.y, ACTION_DOWN);
     });
 
     canvas.addEventListener('mousemove', (e) => {
@@ -280,7 +286,7 @@
         const pos = getCoords(e);
         ctx.lineTo(pos.x, pos.y);
         ctx.stroke();
-        sendPoint(pos.x, pos.y, 0); // ACTION_MOVE
+        sendPoint(pos.x, pos.y, ACTION_MOVE);
     });
 
     window.addEventListener('mouseup', () => {
@@ -288,7 +294,7 @@
         drawing = false;
         strokeCount++;
         document.getElementById('strokeCount').innerText = strokeCount;
-        sendPoint(0, 0, 2); // ACTION_UP
+        sendPoint(0, 0, ACTION_UP);
     });
 
     function getCoords(e) {
@@ -364,10 +370,6 @@
                     }
                     precisionText.style.color = color;
                     if (gauge) gauge.style.stroke = color;
-                }
-
-                if (data.feedback && data.feedback !== "Trazo Estable") {
-                    log.innerHTML = `<div><span style="color:#666;">[${new Date().toLocaleTimeString()}]</span> ${data.feedback}</div>` + log.innerHTML;
                 }
             } catch (err) {
                 // 🚨 SI ALGO EXPLOTA, NOS AVISA POR CONSOLA

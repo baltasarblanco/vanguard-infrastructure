@@ -1,5 +1,6 @@
 #![allow(dead_code)]
-use shared_ipc::{AegisProducer, SharedRing, StrokeEvent};
+mod otel;
+use shared_ipc::{AegisProducer, SharedRing, StrokeEvent, ACTION_DOWN, ACTION_MOVE, ACTION_UP};
 
 use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
 use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags};
@@ -16,7 +17,7 @@ use std::thread;
 use tokio::sync::broadcast;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
-use futures_util::{StreamExt, SinkExt};
+use futures_util::StreamExt;
 use tokio_uring::net::TcpListener;
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -26,9 +27,11 @@ use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::time::{SystemTime, UNIX_EPOCH};
+use opentelemetry::trace::TraceContextExt;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-const BIND_ADDR: &str = "0.0.0.0:8081";      
-const CHRONOS_ADDR: &str = "127.0.0.1:8080"; 
+const BIND_ADDR: &str = "0.0.0.0:8081";
+const CHRONOS_ADDR: &str = "127.0.0.1:8080";
 const TCP_BACKLOG: i32 = 4096;
 const BUFFER_SIZE: usize = 4096;
 const POOL_CAPACITY: usize = 1024;
@@ -64,14 +67,15 @@ static SESSION_COUNTER: AtomicU32 = AtomicU32::new(1);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    println!("📏 TAMAÑO DE EVENTO: {} bytes", std::mem::size_of::<StrokeEvent>());
-    println!("⚙️ [AEGIS CONTROL PLANE] Iniciando secuencia de arranque...");
+    let otel_provider = otel::init_tracing("aegis");
+    tracing::info!(event_bytes = std::mem::size_of::<StrokeEvent>(), "aegis: stroke event size");
+    tracing::info!("aegis: starting up");
 
     // =======================================================================
     // 🌉 PUENTE FANTASMA IPC & RING BUFFER (AEGIS -> CELER)
     // =======================================================================
-    println!("🌉 [AEGIS IPC] Forjando memoria compartida (memfd)...");
-    
+    tracing::info!("aegis: creating shared memory (memfd)");
+
     let celer_name = CString::new("celer_bridge").unwrap();
     let fd = memfd_create(celer_name.as_c_str(), MemFdCreateFlag::MFD_CLOEXEC | MemFdCreateFlag::MFD_ALLOW_SEALING)
         .expect("Fallo al crear memfd");
@@ -87,11 +91,11 @@ async fn main() {
     let ring_ptr = celer_mmap.as_mut_ptr() as *mut SharedRing;
     let producer = unsafe { AegisProducer::new(ring_ptr) };
 
-    let raw_fd = fd.into_raw_fd(); 
+    let raw_fd = fd.into_raw_fd();
 
     // HILO 1: El Centinela (Pasa el File Descriptor a CELER)
     thread::spawn(move || {
-        println!("⏳ [AEGIS IPC] Hilo centinela buscando a CELER en /tmp/celer_bridge.sock...");
+        tracing::info!(socket = "/tmp/celer_bridge.sock", "aegis: awaiting celer handshake");
         let mut intentos = 0;
         let stream = loop {
             match UnixStream::connect("/tmp/celer_bridge.sock") {
@@ -99,35 +103,35 @@ async fn main() {
                 Err(_) => {
                     intentos += 1;
                     if intentos % 5 == 0 {
-                        println!("⚠️ [AEGIS IPC] CELER no responde. Reintentando conexión...");
+                        tracing::warn!(intentos, "aegis: celer not responding, retrying handshake");
                     }
                     std::thread::sleep(Duration::from_secs(2));
                 }
             }
         };
 
-        let iov = [std::io::IoSlice::new(b"ping")]; 
+        let iov = [std::io::IoSlice::new(b"ping")];
         let cmsgs = [ControlMessage::ScmRights(&[raw_fd])];
-        
+
         match sendmsg::<()>(stream.as_raw_fd(), &iov, &cmsgs, MsgFlags::empty(), None) {
-            Ok(_) => println!("✅ [AEGIS IPC] ¡Conexión establecida! File Descriptor transferido a CELER."),
-            Err(e) => eprintln!("❌ [AEGIS IPC] Fallo crítico al inyectar el FD: {}", e),
+            Ok(_) => tracing::info!("aegis: handshake complete, FD transferred to celer"),
+            Err(e) => tracing::error!(error = %e, "aegis: critical FD injection failure"),
         }
     });
 
     // =======================================================================
     // ⛩️ HILO 2: EL DOJO WEBSOCKET
     // =======================================================================
-    let producer_ptr = Box::into_raw(Box::new(producer)) as usize; 
+    let producer_ptr = Box::into_raw(Box::new(producer)) as usize;
 
     tokio::spawn(async move {
         // Le damos tiempo a CELER para que se conecte
-        tokio::time::sleep(Duration::from_secs(2)).await; 
-        
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
         // 🔥 ACÁ ESTÁ EL CAMBIO: Puerto 9090 para no chocar
         let ws_addr = "0.0.0.0:9090";
         let listener = tokio::net::TcpListener::bind(&ws_addr).await.expect("Error WS bind");
-        println!("⛩️ [AEGIS RYŪ] Dojo WebSocket Server escuchando en ws://{}", ws_addr);
+        tracing::info!(addr = %ws_addr, "aegis: websocket server listening");
 
         while let Ok((stream, _)) = listener.accept().await {
             let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -138,23 +142,33 @@ async fn main() {
                 let ws_stream = match accept_async(stream).await {
                     Ok(ws) => ws,
                     Err(e) => {
-                        eprintln!("Error en el handshake WebSocket (Conexión ignorada): {}", e);
+                        tracing::warn!(error = %e, "aegis: websocket handshake failed");
                         return;
                     }
                 };
 
-                println!("⚡ [AEGIS RYŪ] Nuevo discípulo conectado. Session ID: {}", session_id);
+                tracing::info!(session_id, "aegis: new websocket session");
                 let (_, mut ws_receiver) = ws_stream.split();
 
                 while let Some(msg) = ws_receiver.next().await {
                     match msg {
                         Ok(Message::Binary(bin_data)) => {
-                        println!("📦 Aegis recibió paquete de {} bytes", bin_data.len()); // <-- AGREGÁ ESTO
                         if bin_data.len() == 13 || bin_data.len() == 17 {
+                            // Span por mensaje. Capturamos trace_id Y span_id del
+                            // contexto; ambos viajan con el StrokeEvent hasta CELER,
+                            // donde se reconstruye un SpanContext "remoto" para que
+                            // el span de CELER quede anidado como hijo en Jaeger.
+                            let span = tracing::info_span!(
+                                "aegis.recv_stroke",
+                                session_id = session_id,
+                                payload_bytes = bin_data.len(),
+                            );
+                            let _enter = span.enter();
+
                             // 1. Extracción segura de coordenadas (Zero-copy style)
                             let x = f32::from_le_bytes(bin_data[0..4].try_into().unwrap_or([0; 4]));
                             let y = f32::from_le_bytes(bin_data[4..8].try_into().unwrap_or([0; 4]));
-                            
+
                             // Si vienen 17 bytes, el 3er float es presión. Si no, 1.0 por defecto.
                             let pressure = if bin_data.len() == 17 {
                                 f32::from_le_bytes(bin_data[8..12].try_into().unwrap_or([0; 4]))
@@ -166,14 +180,16 @@ async fn main() {
                             let flag_index = bin_data.len() - 1;
                             let flag = bin_data[flag_index];
 
-                            // 2. Mapeo Táctico de Acciones (Normalización para CELER)
+                            // 2. Validación de rango. El frontend usa el mismo convenio
+                            //    canónico que el resto del sistema (ACTION_DOWN=0,
+                            //    ACTION_MOVE=1, ACTION_UP=2 — definidos en shared_ipc).
+                            //    No remapeamos: si el byte llega fuera de rango, es bug
+                            //    del cliente y descartamos el evento.
                             let action = match flag {
-                                1 => 0, // start -> ACTION_DOWN
-                                0 => 1, // move  -> ACTION_MOVE
-                                2 => 2, // end   -> ACTION_UP
+                                ACTION_DOWN | ACTION_MOVE | ACTION_UP => flag,
                                 _ => {
-                                    println!("⚠️ [AEGIS] Flag desconocido: {}", flag);
-                                    return; // Cambiamos continue por return si estamos en un bloque async
+                                    tracing::warn!(flag, "aegis: unknown websocket flag");
+                                    return;
                                 }
                             };
 
@@ -183,31 +199,39 @@ async fn main() {
                                 .unwrap_or_default()
                                 .as_nanos() as u64;
 
-                            // 4. Construcción del Evento Cinético
+                            // 4. Captura del SpanContext completo: trace_id (mismo
+                            //    en todos los spans del árbol) + span_id (identifica
+                            //    este span concreto, que pasará a ser parent_span_id
+                            //    en CELER).
+                            let parent_context = span.context();
+                            let span_ref = parent_context.span();
+                            let sc = span_ref.span_context();
+                            let trace_id = sc.trace_id().to_bytes();
+                            let parent_span_id = sc.span_id().to_bytes();
+
+                            // 5. Construcción del Evento Cinético
                             let event = StrokeEvent {
-                                session_id: session_id as u32, // Aseguramos que sea u32 para el Buffer
+                                session_id: session_id as u32,
                                 timestamp,
                                 x,
                                 y,
                                 pressure,
                                 action,
+                                trace_id,
+                                parent_span_id,
                             };
 
-                            // 5. Inyección al Ring Buffer (Memoria Compartida)
-                            if let Err(_) = producer_clone.push(event) {
-                                // Si el buffer se llena, es que Celer está saturado o colgado
-                                eprintln!("🚨 [AEGIS] Ring Buffer SATURADO. Celer no procesa.");
-                            } else {
-                                // Descomentá esta línea solo para testeo, satura la terminal
-                                // println!("✅ Evento {} enviado a Celer", action);
+                            // 6. Inyección al Ring Buffer (Memoria Compartida)
+                            if producer_clone.push(event).is_err() {
+                                tracing::warn!("aegis: ring buffer saturated, celer not draining");
                             }
-}
+                        }
                         }
                         Ok(Message::Close(_)) => {
-                            println!("🛑 [AEGIS RYŪ] Discípulo {} desconectado.", session_id);
+                            tracing::info!(session_id, "aegis: websocket session disconnected");
                             break;
                         }
-                        _ => {} 
+                        _ => {}
                     }
                 }
             });
@@ -233,7 +257,7 @@ async fn main() {
 
         let handle = thread::spawn(move || {
             core_affinity::set_for_current(core_id);
-            
+
             let mut local_pool = VecDeque::with_capacity(POOL_CAPACITY);
             for _ in 0..POOL_CAPACITY {
                 local_pool.push_back(Vec::with_capacity(BUFFER_SIZE));
@@ -250,10 +274,10 @@ async fn main() {
             socket.bind(&addr.into()).unwrap();
             socket.listen(TCP_BACKLOG).unwrap();
             let std_listener: StdTcpListener = socket.into();
-            
+
             tokio_uring::start(async move {
                 let listener = TcpListener::from_std(std_listener);
-                println!("🚀 [AEGIS-CORE-{}] Motor y Tuberías encendidas.", core_id.id);
+                tracing::info!(core_id = core_id.id, "aegis: core thread ready");
 
                 loop {
                     tokio::select! {
@@ -262,13 +286,13 @@ async fn main() {
                                 let pool_ref = pool.clone();
                                 let conn_pool_ref = conn_pool.clone();
                                 let task_telemetry = tele_clone.clone();
-                                
+
                                 tokio_uring::spawn(async move {
                                     let _guard = ConnectionGuard::new(task_telemetry.clone());
 
                                     let mut buf = pool_ref.borrow_mut().pop_front()
                                         .unwrap_or_else(|| Vec::with_capacity(BUFFER_SIZE));
-                                    buf.clear(); 
+                                    buf.clear();
 
                                     let chronos_stream = if let Some(hot_pipe) = conn_pool_ref.borrow_mut().pop_front() {
                                         hot_pipe
@@ -290,10 +314,10 @@ async fn main() {
                                             task_telemetry.total_bytes.0.fetch_add(n, Ordering::Relaxed);
 
                                             let (write_res, mut buf_written) = chronos_stream.write_all(buf_read).await;
-                                            
+
                                             if write_res.is_ok() {
-                                                buf_written.clear(); 
-                                                
+                                                buf_written.clear();
+
                                                 let (resp_res, buf_resp) = chronos_stream.read(buf_written).await;
 
                                                 if let Ok(resp_n) = resp_res {
@@ -302,9 +326,9 @@ async fn main() {
 
                                                         let (_final_res, mut buf_final) = stream.write_all(buf_resp).await;
                                                         buf_final.clear();
-    
+
                                                         task_telemetry.total_requests.0.fetch_add(1, Ordering::Relaxed);
-                                                        
+
                                                         pool_ref.borrow_mut().push_back(buf_final);
                                                         if conn_pool_ref.borrow().len() < MAX_HOT_PIPES {
                                                             conn_pool_ref.borrow_mut().push_back(chronos_stream);
@@ -334,14 +358,14 @@ async fn main() {
         handles.push(handle);
     }
 
-    println!("🛡️ [AEGIS CONTROL PLANE] Todos los sistemas nominales. HUD en terminal Activado.");
+    tracing::info!("aegis: all subsystems nominal");
 
     let tele_metrics = telemetry.clone();
     tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind("0.0.0.0:8082").await {
             Ok(l) => l,
             Err(_) => {
-                println!("⚠️ [TELEMETRÍA] Puerto 8082 ocupado. Modo CLON activado (operando sin satélite).");
+                tracing::warn!(port = 8082, "aegis: telemetry port unavailable, prometheus endpoint disabled");
                 return;
             }
         };
@@ -351,11 +375,11 @@ async fn main() {
                 tokio::spawn(async move {
                     let mut buf = [0; 512];
                     let _ = stream.read(&mut buf).await;
-                    
+
                     let conns = tele.active_connections.0.load(Ordering::Relaxed);
                     let bytes = tele.total_bytes.0.load(Ordering::Relaxed);
                     let reqs = tele.total_requests.0.load(Ordering::Relaxed);
-    
+
                     let response = format!(
                         "HTTP/1.1 200 OK\r\n\
                         Content-Type: text/plain; version=0.0.4\r\n\
@@ -371,7 +395,7 @@ async fn main() {
                         aegis_total_requests {}\n",
                         conns, bytes, reqs
                     );
-                    
+
                     let _ = stream.write_all(response.as_bytes()).await;
                 });
             }
@@ -383,24 +407,25 @@ async fn main() {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                println!("\n⚠️ [AEGIS CONTROL PLANE] Ctrl+C detectado. Iniciando apagado de la Hidra...");
+                tracing::info!("aegis: ctrl-c received, shutting down");
                 break;
             }
             _ = ticker.tick() => {
                 let conns = telemetry.active_connections.0.load(Ordering::Relaxed);
                 let bytes = telemetry.total_bytes.0.load(Ordering::Relaxed);
                 let mb = bytes as f64 / 1_048_576.0;
-                
+
                 if conns > 0 || bytes > 0 {
-                    println!("📊 [HUD] Conexiones: {} | Tráfico: {:.4} MB", conns, mb);
+                    tracing::info!(connections = conns, traffic_mb = mb, "aegis: hud tick");
                 }
             }
         }
     }
-    
+
     let _ = shutdown_tx.send(());
     for handle in handles {
         handle.join().unwrap();
     }
-    println!("💀 [AEGIS CONTROL PLANE] Apagado completo. Exit Code 0.");
+    let _ = otel_provider.shutdown();
+    tracing::info!("aegis: shutdown complete");
 }

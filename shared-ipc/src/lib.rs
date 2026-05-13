@@ -14,11 +14,34 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub const RING_CAPACITY: usize = 131_072;
 const INDEX_MASK: usize = RING_CAPACITY - 1;
 
+/// Action tag for [`StrokeEvent::action`]. Encodes the lifecycle of a single
+/// stroke: pen down (start of a new stroke), move (continuation), up (end).
+///
+/// These constants are the **single source of truth** for the action protocol
+/// across the entire pipeline: the browser frontend, AEGIS (producer), and
+/// CELER (consumer) all use these exact values. The frontend mirrors them as
+/// JavaScript `const`s in `celer/src/index.html` - keep both in sync.
+///
+/// Values are intentionally small (`u8`) and dense (0/1/2) so the producer
+/// can validate range without a lookup table.
+pub const ACTION_DOWN: u8 = 0;
+pub const ACTION_MOVE: u8 = 1;
+pub const ACTION_UP:   u8 = 2;
+
 /// Evento escrito por AEGIS y leído por CELER.
 ///
 /// Alineado a 64 bytes (una línea de caché L1). El compilador agrega padding
-/// invisible después de `action` para llegar al tamaño total. El layout está
-/// fijado por `tests::abi_contract_truth_serum`.
+/// invisible después de `parent_span_id` para llegar al tamaño total. El layout
+/// está fijado por `tests::abi_contract_truth_serum`.
+///
+/// W3C SpanContext propagado en dos campos, ambos `[u8; N]` para wire format
+/// endianness-agnóstico y match directo con la API de
+/// `opentelemetry::trace::TraceId` / `opentelemetry::trace::SpanId`:
+///   - `trace_id`: 16 bytes. Identifica el trace completo (mismo en todos los
+///     spans del árbol). Sentinel "no trace" = `[0u8; 16]` (TraceId::INVALID).
+///   - `parent_span_id`: 8 bytes. Identifica el span padre dentro de ese trace.
+///     CELER lo usa para reconstruir un `SpanContext` y abrir su span como
+///     hijo del span de AEGIS. Sentinel "no parent" = `[0u8; 8]` (SpanId::INVALID).
 #[repr(C, align(64))]
 #[derive(Debug, Clone, Copy)]
 pub struct StrokeEvent {
@@ -28,6 +51,8 @@ pub struct StrokeEvent {
     pub y: f32,
     pub pressure: f32,
     pub action: u8,
+    pub trace_id: [u8; 16],
+    pub parent_span_id: [u8; 8],
 }
 
 /// Acolchado de línea de caché para prevenir false sharing entre `head` y `tail`.
@@ -153,6 +178,8 @@ mod tests {
         assert_eq!(offset_of!(StrokeEvent, y), 20);
         assert_eq!(offset_of!(StrokeEvent, pressure), 24);
         assert_eq!(offset_of!(StrokeEvent, action), 28);
+        assert_eq!(offset_of!(StrokeEvent, trace_id), 29);
+        assert_eq!(offset_of!(StrokeEvent, parent_span_id), 45);
     }
 
     #[test]
@@ -173,6 +200,8 @@ mod tests {
         let mut producer = unsafe { AegisProducer::new(ptr) };
         let mut consumer = unsafe { CelerConsumer::new(ptr) };
 
+        let trace = [0xab; 16];
+        let span = [0xcd; 8];
         let evt = StrokeEvent {
             session_id: 42,
             timestamp: 1_700_000_000_000_000_000,
@@ -180,6 +209,8 @@ mod tests {
             y: 200.25,
             pressure: 0.7,
             action: 1,
+            trace_id: trace,
+            parent_span_id: span,
         };
         producer.push(evt).expect("push should succeed");
 
@@ -189,9 +220,22 @@ mod tests {
         assert_eq!(read.y, 200.25);
         assert_eq!(read.pressure, 0.7);
         assert_eq!(read.action, 1);
+        assert_eq!(read.trace_id, trace, "trace_id debe sobrevivir el roundtrip byte a byte");
+        assert_eq!(read.parent_span_id, span, "parent_span_id debe sobrevivir el roundtrip byte a byte");
 
         assert!(consumer.pop().is_none(), "ring debería estar vacío");
 
         unsafe { dealloc(ptr as *mut u8, layout) };
+    }
+
+    /// Pin the canonical action protocol. ACTION_DOWN/MOVE/UP must form
+    /// a dense contiguous lifecycle 0..3. The frontend, aegis, and celer
+    /// all rely on these exact values. Any drift breaks tests here before
+    /// it breaks the user-visible system.
+    #[test]
+    fn action_constants_form_dense_lifecycle() {
+        assert_eq!(ACTION_DOWN, 0);
+        assert_eq!(ACTION_MOVE, 1);
+        assert_eq!(ACTION_UP, 2);
     }
 }

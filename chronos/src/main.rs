@@ -10,9 +10,16 @@ mod server; // <- AVISAMSO QUE HAY UN PARSER
 use engine::{Engine, DB_PATH};
 use std::process;
 use std::sync::{Arc, RwLock};
+use tracing_subscriber::EnvFilter;
 
 fn main() {
-    println!("⏳ Iniciando Chronos DB...");
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    tracing::info!("chronos: starting up");
 
     // 1. Instanciamos el Motor
     let engine = Engine::new(DB_PATH).expect("Fallo crítico al iniciar la DB");
@@ -25,8 +32,8 @@ fn main() {
     let db_for_shutdown = Arc::clone(&global_db);
 
     ctrlc::set_handler(move || {
-        println!("\n\n⚠️ SEÑAL DE INTERRUPCIÓN DETECTADA (Ctrl+C)");
-        println!("💾 Activando protocolo de guardado de emergencia...");
+        tracing::info!("chronos: ctrl-c received, shutting down");
+        tracing::info!("chronos: flushing state before exit");
 
         // 1. Tomamos el control absoluto (Escritura) para que nadie más modifique datos
         let mut db = db_for_shutdown.write().unwrap();
@@ -34,11 +41,12 @@ fn main() {
         // 2. Obligamos al motor a guardar/compactar todo en el disco de forma segura
         let _ = db.compact();
 
-        println!("🛑 Memoria asegurada. Servidor Chronos apagado correctamente.¡Hasta la proxima, Arquitecto!");
+        tracing::info!("chronos: shutdown complete");
 
         // 3. Salimos del programa con código 0 (Éxito)
         process::exit(0);
-    }).expect("Error al inicializar el escudo SIGINT");
+    })
+    .expect("Error al inicializar el escudo SIGINT");
     // -------------------------------------------------
 
     // 3. Arrancamos el Servidor TCP

@@ -12,4 +12,11 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 warp = { version = "0.4", features = ["server", "websocket"] }
 futures-util.workspace = true
-logos = "0.16.1"
+
+# Observability (task 1.6)
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
