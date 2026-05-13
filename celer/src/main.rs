@@ -18,7 +18,7 @@ use std::io::{self, Write};
 use warp::Filter;
 use tokio::sync::broadcast;
 use serde::Serialize;
-use futures_util::{SinkExt, StreamExt}; 
+use futures_util::{SinkExt, StreamExt};
 
 use opentelemetry::trace::{
     SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
@@ -46,39 +46,39 @@ struct SessionState {
 #[derive(Clone, Serialize)]
 struct PrecisionEvent {
     session_id: u32,
-    precision: f32,      
+    precision: f32,
     speed: f32,
 }
 
 #[tokio::main]
 async fn main() {
     let _otel_provider = otel::init_tracing("celer");
-    println!("📏 TAMAÑO DE EVENTO: {} bytes", std::mem::size_of::<shared_ipc::StrokeEvent>());
-    
+    tracing::info!(event_bytes = std::mem::size_of::<shared_ipc::StrokeEvent>(), "celer: stroke event size");
+
     // 1. Canal de Telemetría (Broadcast para múltiples pestañas de Chrome/Firefox)
     let (tx, _) = broadcast::channel::<PrecisionEvent>(2048);
-    let tx_for_core = tx.clone(); 
+    let tx_for_core = tx.clone();
 
     // 2. MONITOR DE RENDIMIENTO (Terminal HUD)
     std::thread::spawn(move || {
         let mut last_count = 0;
         let mut last_time = Instant::now();
-        
+
         loop {
-            std::thread::sleep(Duration::from_millis(250)); 
+            std::thread::sleep(Duration::from_millis(250));
             let current_count = EVENTS_PROCESSED.load(Ordering::Relaxed);
             let current_time = Instant::now();
             let delta_events = current_count.saturating_sub(last_count);
             let delta_time = current_time.duration_since(last_time).as_secs_f64();
-            
+
             if delta_time > 0.0 {
                 // 🎯 CAMBIAMOS LA MATEMÁTICA: Ahora son Paquetes Por Segundo (Pps)
                 let pps = delta_events as f64 / delta_time;
-                
+
                 let stdout = io::stdout();
                 let mut handle = stdout.lock();
-                
-                write!(handle, "\x1B[2J\x1B[H").unwrap(); 
+
+                write!(handle, "\x1B[2J\x1B[H").unwrap();
                 writeln!(handle, "========================================").unwrap();
                 writeln!(handle, "     🐉 RYŪ: PRECISION ANALYZER         ").unwrap();
                 writeln!(handle, "========================================").unwrap();
@@ -97,10 +97,10 @@ async fn main() {
         let socket_path = "/tmp/celer_bridge.sock";
         let _ = remove_file(socket_path);
         let listener = UnixListener::bind(socket_path).unwrap();
-        
-        println!("⏳ [CELER IPC] Esperando handshake de AEGIS...");
+
+        tracing::info!(socket = socket_path, "celer: awaiting aegis handshake");
         let (stream, _) = listener.accept().expect("Fallo al conectar con AEGIS");
-        
+
         let mut iov_buf = [0u8; 4];
         let mut iov = [io::IoSliceMut::new(&mut iov_buf)];
         let mut cmsg_buffer = cmsg_space!([std::os::unix::io::RawFd; 1]);
@@ -114,10 +114,10 @@ async fn main() {
         let mut consumer = unsafe { CelerConsumer::new(ring_ptr) };
 
         let mut fsm_pool: Vec<SessionState> = vec![
-            SessionState { 
-                active: false, last_x: 0.0, last_y: 0.0, last_dx: 0.0, last_dy: 0.0, 
+            SessionState {
+                active: false, last_x: 0.0, last_y: 0.0, last_dx: 0.0, last_dy: 0.0,
                 last_timestamp: 0, smoothed_precision: 100.0,
-            }; 
+            };
             SESSION_POOL_SIZE
         ];
 
@@ -195,9 +195,9 @@ async fn main() {
                     ACTION_UP => { state.active = false; }
                     _ => {}
                 }
-            } else { 
-                std::hint::spin_loop(); 
-            } 
+            } else {
+                std::hint::spin_loop();
+            }
         }
     });
 
@@ -214,20 +214,20 @@ async fn main() {
             ws.on_upgrade(move |socket| async move {
                 let (mut ws_tx, _) = socket.split();
                 let mut rx = tx.subscribe();
-                
+
                 // 🛡️ BUCLE BLINDADO ANTI-SATURACIÓN
                 loop {
                     match rx.recv().await {
                         Ok(event) => {
                             if let Ok(msg) = serde_json::to_string(&event) {
-                                if ws_tx.send(warp::ws::Message::text(msg)).await.is_err() { 
+                                if ws_tx.send(warp::ws::Message::text(msg)).await.is_err() {
                                     break; // El navegador se cerró
                                 }
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             // 🚀 Si hay demasiados datos, ignoramos los viejos y seguimos
-                            continue; 
+                            continue;
                         }
                         Err(_) => {
                             break; // El canal principal murió
@@ -242,8 +242,8 @@ async fn main() {
 
     let routes = ws_route.or(ping_route).with(cors);
 
-    println!("🚀 RYŪ DOJO ONLINE | HTTP y WS en puerto 3031");
-    
+    tracing::info!(port = 3031, "celer: ryuu http+ws listening");
+
     // MUDANZA AL PUERTO 3031
     warp::serve(routes)
         .run(([0, 0, 0, 0], 3031))
